@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <unistd.h>
 #include <time.h>
@@ -109,10 +110,12 @@ static void read_cpu_totals(unsigned long long *idle, unsigned long long *total)
        DEFAULT stats screen's hot path (draw_stats_screen calls both
        every redraw), not an obscure corner case. */
     if (!f) { *idle = 0; *total = 0; return; }
-    unsigned long long user, nice, sys, idl, iowait, irq, softirq, steal;
-    fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
-           &user, &nice, &sys, &idl, &iowait, &irq, &softirq, &steal);
+    unsigned long long user = 0, nice = 0, sys = 0, idl = 0;
+    unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
+    int fields = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                        &user, &nice, &sys, &idl, &iowait, &irq, &softirq, &steal);
     fclose(f);
+    if (fields != 8) { *idle = 0; *total = 0; return; }
     *idle = idl + iowait;
     *total = user + nice + sys + idl + iowait + irq + softirq + steal;
 }
@@ -121,9 +124,15 @@ static double get_cpu_percent(void) {
     static unsigned long long prev_idle = 0, prev_total = 0;
     unsigned long long idle, total;
     read_cpu_totals(&idle, &total);
+    if (total < prev_total || idle < prev_idle) {
+        prev_idle = idle;
+        prev_total = total;
+        return 0.0;
+    }
     unsigned long long dt = total - prev_total;
     unsigned long long di = idle - prev_idle;
-    double pct = (dt > 0) ? (100.0 * (double)(dt - di) / (double)dt) : 0.0;
+    double pct = (dt > 0 && di <= dt)
+        ? (100.0 * (double)(dt - di) / (double)dt) : 0.0;
     prev_idle = idle; prev_total = total;
     return pct;
 }
@@ -147,22 +156,200 @@ static void get_ram_kb(long *used_kb, long *total_kb) {
     *used_kb = mem_total - mem_avail;
 }
 
-static int get_cpu_temp_c(void) {
-    FILE *f = fopen("/sys/class/hwmon/hwmon3/temp1_input", "r");
+static int g_nvidia_gpu_temp_c = -1;
+static double g_nvidia_gpu_percent = -1;
+static unsigned long long g_nvidia_vram_used = 0;
+static unsigned long long g_nvidia_vram_total = 0;
+
+static int read_hwmon_temp_c(const char *path) {
+    FILE *f = fopen(path, "r");
     if (!f) return -1;
-    int millideg = 0;
-    fscanf(f, "%d", &millideg);
+    int millideg;
+    int ok = fscanf(f, "%d", &millideg) == 1;
     fclose(f);
-    return millideg / 1000;
+    return ok ? millideg / 1000 : -1;
+}
+
+static int contains_case_insensitive(const char *text, const char *needle) {
+    if (!text || !needle || !*needle) return 0;
+    for (; *text; text++) {
+        const char *a = text, *b = needle;
+        while (*a && *b &&
+               tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static int matches_any(const char *text, const char *const *needles, size_t count) {
+    for (size_t i = 0; i < count; i++)
+        if (contains_case_insensitive(text, needles[i])) return 1;
+    return 0;
+}
+
+static int read_hwmon_driver_temp(const char *const *drivers, size_t driver_count,
+                                  const char *const *labels, size_t label_count,
+                                  int allow_first_channel) {
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (!dir) return -1;
+    int fallback = -1;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+        char path[512], name[128];
+        snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", entry->d_name);
+        FILE *name_file = fopen(path, "r");
+        if (!name_file) continue;
+        if (!fgets(name, sizeof(name), name_file)) {
+            fclose(name_file);
+            continue;
+        }
+        fclose(name_file);
+        name[strcspn(name, "\r\n")] = 0;
+        if (!matches_any(name, drivers, driver_count)) continue;
+
+        for (int channel = 1; channel <= 32; channel++) {
+            char input_path[512], label_path[512], label[128] = "";
+            snprintf(input_path, sizeof(input_path),
+                     "/sys/class/hwmon/%s/temp%d_input", entry->d_name, channel);
+            int temp = read_hwmon_temp_c(input_path);
+            if (temp < 0) continue;
+            snprintf(label_path, sizeof(label_path),
+                     "/sys/class/hwmon/%s/temp%d_label", entry->d_name, channel);
+            FILE *label_file = fopen(label_path, "r");
+            if (label_file) {
+                if (fgets(label, sizeof(label), label_file))
+                    label[strcspn(label, "\r\n")] = 0;
+                fclose(label_file);
+            }
+            if (label_count && matches_any(label, labels, label_count)) {
+                closedir(dir);
+                return temp;
+            }
+            if (allow_first_channel && fallback < 0) fallback = temp;
+        }
+    }
+    closedir(dir);
+    return fallback;
+}
+
+static int compare_hwmon_names(const void *left, const void *right) {
+    const char *a = left;
+    const char *b = right;
+    return atoi(a + 5) - atoi(b + 5);
+}
+
+static int get_motherboard_temp_c(int index) {
+    static const char *const drivers[] = {
+        "pch_", "nct", "it87", "w836", "asusec", "asus", "dell_smm", "thinkpad"
+    };
+    if (index < 0) return -1;
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (!dir) return -1;
+    char hwmon_names[64][256];
+    size_t count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && count < 64) {
+        if (strncmp(entry->d_name, "hwmon", 5) != 0 ||
+            !isdigit((unsigned char)entry->d_name[5])) continue;
+        size_t name_length = strlen(entry->d_name);
+        if (name_length >= sizeof(hwmon_names[count])) continue;
+        memcpy(hwmon_names[count], entry->d_name, name_length + 1);
+        count++;
+    }
+    closedir(dir);
+    qsort(hwmon_names, count, sizeof(hwmon_names[0]), compare_hwmon_names);
+
+    for (size_t i = 0; i < count; i++) {
+        char path[512], name[128];
+        snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", hwmon_names[i]);
+        FILE *name_file = fopen(path, "r");
+        if (!name_file) continue;
+        if (!fgets(name, sizeof(name), name_file)) {
+            fclose(name_file);
+            continue;
+        }
+        fclose(name_file);
+        name[strcspn(name, "\r\n")] = 0;
+        if (!matches_any(name, drivers, sizeof(drivers) / sizeof(drivers[0]))) continue;
+
+        for (int channel = 1; channel <= 32; channel++) {
+            snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp%d_input",
+                     hwmon_names[i], channel);
+            int temp = read_hwmon_temp_c(path);
+            if (temp < 0) continue;
+            if (index-- == 0) return temp;
+        }
+    }
+    return -1;
+}
+
+static int get_cpu_temp_c(void) {
+    static const char *const drivers[] = {"coretemp", "k10temp", "zenpower", "cpu_thermal"};
+    static const char *const labels[] = {"package", "tctl", "tdie"};
+    return read_hwmon_driver_temp(drivers, sizeof(drivers) / sizeof(drivers[0]),
+                                  labels, sizeof(labels) / sizeof(labels[0]), 1);
+}
+
+static int get_gpu_temp_c(int sensor) {
+    static const char *const drivers[] = {"amdgpu", "nouveau", "nvidia"};
+    static const char *const edge_labels[] = {"edge", "gpu core", "gpu"};
+    static const char *const hotspot_labels[] = {"junction", "hotspot"};
+    static const char *const memory_labels[] = {"mem", "vram"};
+    const char *const *labels = edge_labels;
+    size_t label_count = sizeof(edge_labels) / sizeof(edge_labels[0]);
+    if (sensor == 1) {
+        labels = hotspot_labels;
+        label_count = sizeof(hotspot_labels) / sizeof(hotspot_labels[0]);
+    } else if (sensor == 2) {
+        labels = memory_labels;
+        label_count = sizeof(memory_labels) / sizeof(memory_labels[0]);
+    }
+    int temp = read_hwmon_driver_temp(drivers, sizeof(drivers) / sizeof(drivers[0]),
+                                      labels, label_count, sensor == 0);
+    if (temp >= 0) return temp;
+    if (sensor == 0) return g_nvidia_gpu_temp_c;
+    return -1;
 }
 
 static void get_vram_bytes(unsigned long long *used, unsigned long long *total) {
-    FILE *f;
-    *used = 0; *total = 0;
-    f = fopen("/sys/class/drm/card1/device/mem_info_vram_used", "r");
-    if (f) { fscanf(f, "%llu", used); fclose(f); }
-    f = fopen("/sys/class/drm/card1/device/mem_info_vram_total", "r");
-    if (f) { fscanf(f, "%llu", total); fclose(f); }
+    *used = 0;
+    *total = 0;
+    DIR *dir = opendir("/sys/class/drm");
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (strncmp(entry->d_name, "card", 4) != 0 ||
+                !isdigit((unsigned char)entry->d_name[4])) continue;
+            char used_path[512], total_path[512];
+            snprintf(used_path, sizeof(used_path),
+                     "/sys/class/drm/%s/device/mem_info_vram_used", entry->d_name);
+            snprintf(total_path, sizeof(total_path),
+                     "/sys/class/drm/%s/device/mem_info_vram_total", entry->d_name);
+            FILE *f = fopen(used_path, "r");
+            if (!f) continue;
+            int used_ok = fscanf(f, "%llu", used) == 1;
+            fclose(f);
+            f = fopen(total_path, "r");
+            if (!f) continue;
+            int total_ok = fscanf(f, "%llu", total) == 1;
+            fclose(f);
+            if (used_ok && total_ok && *total > 0) {
+                closedir(dir);
+                return;
+            }
+            *used = 0;
+            *total = 0;
+        }
+        closedir(dir);
+    }
+    if (g_nvidia_vram_total > 0) {
+        *used = g_nvidia_vram_used;
+        *total = g_nvidia_vram_total;
+    }
 }
 
 static void format_gb(unsigned long long bytes, char *out, size_t outlen) {
@@ -186,22 +373,77 @@ static double get_cpu_ghz(void) {
 
 /* --- Phase 2 sensors (v1.1) --- */
 
-static int read_hwmon_temp_c(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    int millideg = 0;
-    fscanf(f, "%d", &millideg);
-    fclose(f);
-    return millideg / 1000;
+static double get_gpu_percent(void) {
+    DIR *dir = opendir("/sys/class/drm");
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (strncmp(entry->d_name, "card", 4) != 0 ||
+                !isdigit((unsigned char)entry->d_name[4])) continue;
+            char path[512];
+            snprintf(path, sizeof(path), "/sys/class/drm/%s/device/gpu_busy_percent",
+                     entry->d_name);
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            int value;
+            int ok = fscanf(f, "%d", &value) == 1;
+            fclose(f);
+            if (ok && value >= 0 && value <= 100) {
+                closedir(dir);
+                return (double)value;
+            }
+        }
+        closedir(dir);
+    }
+    return g_nvidia_gpu_percent;
 }
 
-static double get_gpu_percent(void) {
-    FILE *f = fopen("/sys/class/drm/card1/device/gpu_busy_percent", "r");
-    if (!f) return -1;
-    int v = 0;
-    fscanf(f, "%d", &v);
-    fclose(f);
-    return (double)v;
+static void update_nvidia_stats(void) {
+    static const char *const binaries[] = {"/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi"};
+    const char *binary = NULL;
+    g_nvidia_gpu_temp_c = -1;
+    g_nvidia_gpu_percent = -1;
+    g_nvidia_vram_used = 0;
+    g_nvidia_vram_total = 0;
+    for (size_t i = 0; i < sizeof(binaries) / sizeof(binaries[0]); i++) {
+        if (access(binaries[i], X_OK) == 0) {
+            binary = binaries[i];
+            break;
+        }
+    }
+    if (!binary) return;
+
+    char command[256];
+    snprintf(command, sizeof(command),
+             "%s --query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total "
+             "--format=csv,noheader,nounits 2>/dev/null", binary);
+    FILE *pipe = popen(command, "r");
+    if (!pipe) return;
+    char line[256];
+    if (fgets(line, sizeof(line), pipe)) {
+        char *field = strtok(line, ",");
+        char *end;
+        long temperature = field ? strtol(field, &end, 10) : -1;
+        int temperature_ok = field && end != field;
+        field = strtok(NULL, ",");
+        double utilization = field ? strtod(field, &end) : -1;
+        int utilization_ok = field && end != field;
+        field = strtok(NULL, ",");
+        double used_mb = field ? strtod(field, &end) : -1;
+        int used_ok = field && end != field;
+        field = strtok(NULL, ",");
+        double total_mb = field ? strtod(field, &end) : -1;
+        int total_ok = field && end != field;
+        if (temperature_ok && temperature >= 0 && temperature <= 200)
+            g_nvidia_gpu_temp_c = (int)temperature;
+        if (utilization_ok && utilization >= 0 && utilization <= 100)
+            g_nvidia_gpu_percent = utilization;
+        if (used_ok && total_ok && used_mb >= 0 && total_mb > 0) {
+            g_nvidia_vram_used = (unsigned long long)(used_mb * 1024.0 * 1024.0);
+            g_nvidia_vram_total = (unsigned long long)(total_mb * 1024.0 * 1024.0);
+        }
+    }
+    pclose(pipe);
 }
 
 static double get_swap_percent(void) {
@@ -243,32 +485,124 @@ static double get_uptime_hours(void) {
    frame (regardless of how many elements reference it) into these cached
    globals -- calling the delta logic per-element would corrupt the deltas. */
 static double g_net_down_kbps = 0, g_net_up_kbps = 0;
+static char g_net_iface[64] = "";
+
+static int interface_is_up(const char *iface) {
+    char path[256], state[32];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", iface);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int ok = fgets(state, sizeof(state), f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    state[strcspn(state, "\r\n")] = 0;
+    return strcmp(state, "up") == 0 || strcmp(state, "unknown") == 0;
+}
+
+static int choose_network_interface(char *iface, size_t iface_size) {
+    char best[64] = "";
+    unsigned int best_metric = ~0U;
+    FILE *routes = fopen("/proc/net/route", "r");
+    if (routes) {
+        char line[256];
+        fgets(line, sizeof(line), routes);
+        while (fgets(line, sizeof(line), routes)) {
+            char candidate[64], destination[16], gateway[16];
+            unsigned int flags, metric;
+            if (sscanf(line, "%63s %15s %15s %x %*d %*d %u",
+                       candidate, destination, gateway, &flags, &metric) == 5 &&
+                strcmp(destination, "00000000") == 0 && (flags & 1) &&
+                metric < best_metric && interface_is_up(candidate)) {
+                snprintf(best, sizeof(best), "%s", candidate);
+                best_metric = metric;
+            }
+        }
+        fclose(routes);
+    }
+    if (!best[0]) {
+        DIR *dir = opendir("/sys/class/net");
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_name[0] == '.' || strcmp(entry->d_name, "lo") == 0 ||
+                    !interface_is_up(entry->d_name)) continue;
+                size_t name_length = strlen(entry->d_name);
+                if (name_length >= sizeof(best)) continue;
+                memcpy(best, entry->d_name, name_length + 1);
+                break;
+            }
+            closedir(dir);
+        }
+    }
+    if (!best[0]) return 0;
+    snprintf(iface, iface_size, "%s", best);
+    return 1;
+}
+
+static int read_network_counters(const char *iface,
+                                 unsigned long long *rx, unsigned long long *tx) {
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) return 0;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char *name = line;
+        while (isspace((unsigned char)*name)) name++;
+        if (strcmp(name, iface) != 0) continue;
+        char *value_text = colon + 1;
+        found = 1;
+        for (int field = 0; field <= 8; field++) {
+            while (isspace((unsigned char)*value_text)) value_text++;
+            if (!isdigit((unsigned char)*value_text)) {
+                found = 0;
+                break;
+            }
+            char *end;
+            unsigned long long value = strtoull(value_text, &end, 10);
+            if (end == value_text) {
+                found = 0;
+                break;
+            }
+            if (field == 0) *rx = value;
+            if (field == 8) *tx = value;
+            value_text = end;
+        }
+        break;
+    }
+    fclose(f);
+    return found;
+}
 
 static void update_net_speed(void) {
     static unsigned long long prev_rx = 0, prev_tx = 0;
     static time_t prev_time = 0;
+    char iface[64] = "";
     unsigned long long rx = 0, tx = 0;
-    FILE *f = fopen("/proc/net/dev", "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            char *iface = strstr(line, "wlp4s0:");
-            if (iface) {
-                unsigned long long r, t;
-                sscanf(iface + 7, "%llu %*u %*u %*u %*u %*u %*u %*u %llu", &r, &t);
-                rx = r; tx = t;
-                break;
-            }
-        }
-        fclose(f);
-    }
+    int have_interface = choose_network_interface(iface, sizeof(iface));
+    int have_counters = have_interface && read_network_counters(iface, &rx, &tx);
     time_t now = time(NULL);
+    if (!have_counters || strcmp(iface, g_net_iface) != 0 ||
+        rx < prev_rx || tx < prev_tx) {
+        g_net_down_kbps = 0;
+        g_net_up_kbps = 0;
+        prev_rx = rx;
+        prev_tx = tx;
+        prev_time = now;
+        snprintf(g_net_iface, sizeof(g_net_iface), "%s",
+                 have_counters ? iface : "");
+        return;
+    }
     double dt = prev_time > 0 ? difftime(now, prev_time) : 0;
-    if (dt > 0 && prev_rx > 0) {
+    if (dt > 0) {
         g_net_down_kbps = (rx - prev_rx) / 1024.0 / dt;
         g_net_up_kbps = (tx - prev_tx) / 1024.0 / dt;
+        prev_rx = rx;
+        prev_tx = tx;
+        prev_time = now;
     }
-    prev_rx = rx; prev_tx = tx; prev_time = now;
 }
 
 /* Media info (song/artist/elapsed) via playerctl -- deliberately
@@ -434,13 +768,12 @@ static void draw_vertical_slim_bar(g15canvas *c, int x, int y, int w, int h, int
     }
 }
 
-/* Labels: Eurostile Bold (custom-converted, matches original G510 look).
-   Numbers: the library's own built-in bitmap font -- it was purpose-built
-   for this exact tiny resolution, so it stays legible where converted
-   TTFs keep garbling at 6-8px. */
+/* Labels use the bundled Liberation Sans Bold conversion by default.
+   Numbers and custom-screen text keep the G15 bitmap fonts, which were
+   purpose-built for this tiny resolution. */
 static g15font *label_font = NULL;
 
-#define LABEL_Y_OFFSET 3 /* Eurostile's metrics sit higher than the number font's */
+#define LABEL_Y_OFFSET 3
 
 /* PROJECT_DIR is passed at compile time by install.sh/rebuild.sh
    (-DPROJECT_DIR='"'$DIR'"') so this file doesn't hardcode a username
@@ -454,16 +787,11 @@ static g15font *label_font = NULL;
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR not defined -- compile via install.sh or scripts/rebuild.sh, or pass -DPROJECT_DIR='\"/your/checkout/path\"' yourself"
 #endif
-/* Checks ~/.local/share/g510-lcd/fonts/ first (always user-writable,
-   works identically whether this binary is a dev checkout or a real
-   package under root-owned /usr/lib/g510-lcd) before falling back to
-   the PROJECT_DIR-relative path (keeps working for anyone who already
-   has their converted font sitting in a dev checkout, no migration
-   needed -- the fallback is permanent, not a one-time transition).
-   Can't ship the font itself either way (commercial license), so this
-   doesn't remove the manual conversion step -- it just means that
-   step no longer needs sudo for a packaged install. */
-#define FONT_PATH_FALLBACK PROJECT_DIR "/fonts/lcd-label-8.fnt"
+/* Prefer an explicit user font override, then the bundled, freely
+   licensed Liberation Sans Bold font. The G15 bitmap fonts remain the
+   renderer for sensor values and custom-screen text; this font is for
+   the built-in screen's labels only. */
+#define FONT_PATH_FALLBACK PROJECT_DIR "/fonts/lcd-label-8-fallback.fnt"
 /* font_path() itself is defined further down, right after data_dir()
    -- it calls data_dir(), which needs to exist first. */
 
@@ -558,13 +886,9 @@ static const char *font_path(void) {
     return FONT_PATH_FALLBACK;
 }
 
-/* Second-tier fallback: a genuinely clean, SIL-OFL-licensed font
-   (fonts/source-ttf/FALLBACK.ttf, converted to lcd-label-8-fallback.fnt
-   by install.sh/scripts/rebuild.sh) used only if the primary font at
-   font_path() is missing, unparseable, or fails label_font_is_sane()
-   (see font_sanity.h). Same data_dir()-then-PROJECT_DIR resolution
-   order as font_path() itself. */
-#define FALLBACK_FONT_PATH_FALLBACK PROJECT_DIR "/fonts/lcd-label-8-fallback.fnt"
+/* Keep the previous project font as a secondary fallback for users
+   who still have it converted. */
+#define FALLBACK_FONT_PATH_FALLBACK PROJECT_DIR "/fonts/lcd-label-8.fnt"
 
 static const char *fallback_font_path(void) {
     static char path[256];
@@ -601,9 +925,8 @@ static const char *disk_secondary_path(void) {
     return path;
 }
 
-/* label_font is only NULL when the commercially-licensed custom font
-   (see main()) couldn't be loaded -- no font conversion done yet, or a
-   fresh package install with nothing configured. Rather than refuse to
+/* label_font is only NULL when neither converted label font could be
+   loaded. Rather than refuse to
    run at all, every label falls back to libg15render's own built-in
    G15_TEXT_SMALL renderer, already used everywhere else in this file
    for non-label text. libg15render has no public API to measure that
@@ -706,13 +1029,29 @@ static const char *screen_state_path(void) {
     return path;
 }
 
+static const char *persistent_screen_state_path(void) {
+    static char path[256];
+    const char *home = getenv("HOME");
+    snprintf(path, sizeof(path), "%s/.local/share/g510-lcd/active_screen",
+             home ? home : "/tmp");
+    return path;
+}
+
 static int read_screen(void) {
-    FILE *f = fopen(screen_state_path(), "r");
-    if (!f) return 0;
-    int s = 0;
-    fscanf(f, "%d", &s);
-    fclose(f);
-    return s;
+    const char *paths[] = {
+        screen_state_path(),
+        persistent_screen_state_path()
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        int s = -1;
+        char extra;
+        int valid = fscanf(f, "%d %c", &s, &extra) == 1 && s >= 0 && s <= 5;
+        fclose(f);
+        if (valid) return s;
+    }
+    return 0;
 }
 
 /* Screen 0: the original built-in stats screen. Pulled into its own
@@ -737,19 +1076,29 @@ static void draw_stats_screen(g15canvas *canvas) {
 
     unsigned long long vram_used, vram_total;
     get_vram_bytes(&vram_used, &vram_total);
-    int vram_pct = vram_total > 0 ? (int)(100.0 * vram_used / vram_total) : 0;
     char vram_pct_str[16], vram_amt_str[16];
-    snprintf(vram_pct_str, sizeof(vram_pct_str), "%3d%%", vram_pct);
-    format_gb(vram_used, vram_amt_str, sizeof(vram_amt_str));
+    int vram_pct = vram_total > 0 ? (int)(100.0 * vram_used / vram_total) : 0;
+    if (vram_total > 0) {
+        snprintf(vram_pct_str, sizeof(vram_pct_str), "%3d%%", vram_pct);
+        format_gb(vram_used, vram_amt_str, sizeof(vram_amt_str));
+    } else {
+        snprintf(vram_pct_str, sizeof(vram_pct_str), "N/A");
+        snprintf(vram_amt_str, sizeof(vram_amt_str), "N/A");
+    }
     draw_row(canvas, ROW_VRAM, "VRAM", vram_pct, vram_pct_str, vram_amt_str, 0);
 
     int temp_c = get_cpu_temp_c();
-    if (temp_c > max_temp_seen) max_temp_seen = temp_c;
     char temp_str[16], temp_max_str[16];
-    snprintf(temp_str, sizeof(temp_str), "%d" "\xB0" "C", temp_c);
-    snprintf(temp_max_str, sizeof(temp_max_str), "MAX %d" "\xB0" "C", max_temp_seen);
-    /* temp bar: use % of a 0-90C scale just to give a visual sense of magnitude */
-    int temp_pct = temp_c > 0 ? (temp_c * 100 / 90) : 0;
+    int temp_pct = 0;
+    if (temp_c >= 0) {
+        if (temp_c > max_temp_seen) max_temp_seen = temp_c;
+        snprintf(temp_str, sizeof(temp_str), "%d" "\xB0" "C", temp_c);
+        snprintf(temp_max_str, sizeof(temp_max_str), "MAX %d" "\xB0" "C", max_temp_seen);
+        temp_pct = temp_c * 100 / 90;
+    } else {
+        snprintf(temp_str, sizeof(temp_str), "N/A");
+        snprintf(temp_max_str, sizeof(temp_max_str), "MAX N/A");
+    }
     draw_row(canvas, ROW_TEMP, "TEMP", temp_pct, temp_str, temp_max_str, 1);
 }
 
@@ -1013,11 +1362,16 @@ static double get_cpu_core_percent(int core) {
         initialized[core] = 1;
         return 0.0;
     }
+    if (total < previous_total[core] || idle_total < previous_idle[core]) {
+        previous_total[core] = total;
+        previous_idle[core] = idle_total;
+        return 0.0;
+    }
     unsigned long long delta_total = total - previous_total[core];
     unsigned long long delta_idle = idle_total - previous_idle[core];
     previous_total[core] = total;
     previous_idle[core] = idle_total;
-    return delta_total > 0
+    return delta_total > 0 && delta_idle <= delta_total
         ? 100.0 * (double)(delta_total - delta_idle) / (double)delta_total
         : 0.0;
 }
@@ -1044,8 +1398,10 @@ static void get_sensor_value(const char *key, double *pct_for_bar, char *disp, s
         snprintf(disp, displen, "%.1fGHz", get_cpu_ghz());
     } else if (strcmp(key, "CPU_TEMP") == 0) {
         int t = get_cpu_temp_c();
-        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
-        snprintf(disp, displen, "%d\xB0" "C", t);
+        if (t >= 0) {
+            *pct_for_bar = t * 100.0 / 90.0;
+            snprintf(disp, displen, "%d\xB0" "C", t);
+        } else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "RAM_PCT") == 0) {
         long u, t; get_ram_kb(&u, &t);
         double v = t > 0 ? 100.0 * u / t : 0;
@@ -1056,30 +1412,40 @@ static void get_sensor_value(const char *key, double *pct_for_bar, char *disp, s
         snprintf(disp, displen, "%.1fG", u / (1024.0 * 1024.0));
     } else if (strcmp(key, "VRAM_PCT") == 0) {
         unsigned long long u, t; get_vram_bytes(&u, &t);
-        double v = t > 0 ? 100.0 * u / t : 0;
-        *pct_for_bar = v;
-        snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+        if (t > 0) {
+            double v = 100.0 * u / t;
+            *pct_for_bar = v;
+            snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+        } else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "VRAM_AMOUNT") == 0) {
         unsigned long long u, t; get_vram_bytes(&u, &t);
-        format_gb(u, disp, displen);
+        if (t > 0) format_gb(u, disp, displen);
+        else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "MAXTEMP") == 0) {
-        snprintf(disp, displen, "%d\xB0" "C", max_temp_seen);
+        if (max_temp_seen > 0) snprintf(disp, displen, "%d\xB0" "C", max_temp_seen);
+        else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "GPU_PCT") == 0) {
         double v = get_gpu_percent();
         if (v < 0) snprintf(disp, displen, "N/A");
         else { *pct_for_bar = v; snprintf(disp, displen, "%d%%", (int)v); }
     } else if (strcmp(key, "GPU_EDGE_TEMP") == 0) {
-        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp1_input");
-        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
-        snprintf(disp, displen, "%d\xB0" "C", t);
+        int t = get_gpu_temp_c(0);
+        if (t >= 0) {
+            *pct_for_bar = t * 100.0 / 90.0;
+            snprintf(disp, displen, "%d\xB0" "C", t);
+        } else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "GPU_HOTSPOT_TEMP") == 0) {
-        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp2_input");
-        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
-        snprintf(disp, displen, "%d\xB0" "C", t);
+        int t = get_gpu_temp_c(1);
+        if (t >= 0) {
+            *pct_for_bar = t * 100.0 / 90.0;
+            snprintf(disp, displen, "%d\xB0" "C", t);
+        } else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "GPU_VRAM_TEMP") == 0) {
-        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp3_input");
-        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
-        snprintf(disp, displen, "%d\xB0" "C", t);
+        int t = get_gpu_temp_c(2);
+        if (t >= 0) {
+            *pct_for_bar = t * 100.0 / 90.0;
+            snprintf(disp, displen, "%d\xB0" "C", t);
+        } else snprintf(disp, displen, "N/A");
     } else if (strcmp(key, "SWAP_PCT") == 0) {
         double v = get_swap_percent();
         *pct_for_bar = v;
@@ -1112,11 +1478,11 @@ static void get_sensor_value(const char *key, double *pct_for_bar, char *disp, s
         snprintf(disp, displen, "%s", g_media_elapsed);
     } else if (strncmp(key, "MB_TEMP", 7) == 0) {
         int n = atoi(key + 7);
-        char path[128];
-        snprintf(path, sizeof(path), "/sys/class/hwmon/hwmon4/temp%d_input", n);
-        int t = read_hwmon_temp_c(path);
-        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
-        snprintf(disp, displen, "%d\xB0" "C", t);
+        int t = n > 0 ? get_motherboard_temp_c(n - 1) : -1;
+        if (t >= 0) {
+            *pct_for_bar = t * 100.0 / 90.0;
+            snprintf(disp, displen, "%d\xB0" "C", t);
+        } else snprintf(disp, displen, "N/A");
     }
 }
 
@@ -1126,6 +1492,7 @@ static void get_sensor_value(const char *key, double *pct_for_bar, char *disp, s
 
 typedef struct {
     char sensor[24];
+    char label[32];
     char style[8]; /* "number" or "bar" */
     char orientation[12]; /* "horizontal" or "vertical" for bars */
     int x, y;
@@ -1229,6 +1596,7 @@ static void load_custom_screens(void) {
             if (cs->count >= MAX_ELEMENTS) continue;
             element_t *el = &cs->elements[cs->count];
             el->sensor[0] = 0; el->style[0] = 0;
+            el->label[0] = 0;
             strcpy(el->orientation, "horizontal");
             el->x = 0; el->y = 0;
             el->width = 40; /* matches the previous hardcoded bar length -- old
@@ -1243,6 +1611,11 @@ static void load_custom_screens(void) {
                 char key[32], val[64];
                 if (sscanf(tok, "%31[^=]=%63s", key, val) == 2) {
                     if (strcmp(key, "sensor") == 0) { strncpy(el->sensor, val, sizeof(el->sensor) - 1); el->sensor[sizeof(el->sensor) - 1] = 0; }
+                    else if (strcmp(key, "label") == 0) {
+                        strncpy(el->label, val, sizeof(el->label) - 1);
+                        el->label[sizeof(el->label) - 1] = 0;
+                        for (char *p = el->label; *p; p++) if (*p == '_') *p = ' ';
+                    }
                     else if (strcmp(key, "style") == 0) { strncpy(el->style, val, sizeof(el->style) - 1); el->style[sizeof(el->style) - 1] = 0; }
                     else if (strcmp(key, "orientation") == 0 && strcmp(val, "vertical") == 0)
                         strcpy(el->orientation, "vertical");
@@ -1376,6 +1749,10 @@ static int g_element_bounds_count = 0;
 static void draw_element(g15canvas *c, element_t *el) {
     const sensor_def_t *def = find_sensor(el->sensor);
     if (!def) return;
+    int label_disabled = strcmp(el->sensor, "TIME") == 0 ||
+                         strcmp(el->sensor, "DATE") == 0;
+    const char *label = label_disabled ? "" :
+                        (el->label[0] ? el->label : def->label);
     double pct_for_bar;
     char disp[32];
     get_sensor_value(el->sensor, &pct_for_bar, disp, sizeof(disp));
@@ -1383,15 +1760,32 @@ static void draw_element(g15canvas *c, element_t *el) {
     int vertical_bar = strcmp(el->style, "bar") == 0 &&
                        strcmp(el->orientation, "vertical") == 0 &&
                        (def->is_percent || def->is_temp) && pct_for_bar >= 0;
-    if (!vertical_bar) draw_label(c, el->x, el->y, def->label);
-    int label_w = vertical_bar ? 0 : label_text_width(def->label);
+    int label_w = 0;
+    int vertical_label_height = vertical_bar && el->height >= 10 ? 6 : 0;
+    if (vertical_bar) {
+        if (vertical_label_height) {
+            char compact_label[sizeof(el->label) + 1];
+            snprintf(compact_label, sizeof(compact_label), "%s", label);
+            int label_budget = el->width < 10 ? 10 : el->width;
+            int visible_width = G15_LCD_WIDTH - el->x - 1;
+            if (label_budget > visible_width) label_budget = visible_width;
+            truncate_builtin_text(compact_label, G15_TEXT_SMALL, label_budget);
+            label_w = measure_builtin_text_width(compact_label, G15_TEXT_SMALL);
+            g15r_renderString(c, (unsigned char*)compact_label, 0, G15_TEXT_SMALL, el->x, el->y);
+        }
+    } else {
+        draw_label(c, el->x, el->y, label);
+        label_w = label_text_width(label);
+    }
+    if (vertical_bar && !vertical_label_height) label_w = el->width;
     int value_x = el->x + label_w + 4;
 
     element_bounds_t *b = (g_element_bounds_count < MAX_ELEMENTS)
         ? &g_element_bounds[g_element_bounds_count++] : NULL;
     if (b) {
         b->label_x1 = el->x; b->label_y1 = el->y;
-        b->label_x2 = el->x + label_w; b->label_y2 = el->y + label_text_height();
+        b->label_x2 = el->x + label_w;
+        b->label_y2 = el->y + (vertical_bar ? vertical_label_height : label_text_height());
         b->is_bar = 0;
         b->is_vertical = 0;
     }
@@ -1430,8 +1824,8 @@ static void draw_element(g15canvas *c, element_t *el) {
     if (vertical_bar) {
         int bar_x1 = el->x;
         int bar_width = el->width;
-        int bar_y1 = el->y;
-        int bar_height = el->height;
+        int bar_y1 = el->y + vertical_label_height;
+        int bar_height = el->height - vertical_label_height;
         if (bar_width < 2) bar_width = 2;
         if (bar_width > G15_LCD_WIDTH - bar_x1) bar_width = G15_LCD_WIDTH - bar_x1;
         if (bar_height < 2) bar_height = 2;
@@ -1439,9 +1833,9 @@ static void draw_element(g15canvas *c, element_t *el) {
         draw_vertical_slim_bar(c, bar_x1, bar_y1, bar_width, bar_height, (int)pct_for_bar);
         if (b) {
             b->label_x1 = bar_x1;
-            b->label_y1 = bar_y1;
+            b->label_y1 = el->y;
             b->label_x2 = bar_x1 + bar_width;
-            b->label_y2 = bar_y1 + bar_height;
+            b->label_y2 = el->y + vertical_label_height;
             b->is_bar = 1;
             b->is_vertical = 1;
             b->bar_x1 = bar_x1; b->bar_x2 = bar_x1 + bar_width;
@@ -1660,14 +2054,15 @@ int main(int argc, char **argv) {
     signal(SIGINT, viz_signal_cleanup);
 
     /* Three-tier font fallback chain, none of it fatal:
-       1. font_path() -- the primary bundled/converted label font.
+       1. font_path() -- a user override or the bundled Liberation Sans
+          Bold label font.
        2. If that's missing, unparseable, OR loads but fails
           label_font_is_sane() (see font_sanity.h -- guards against a
           font that "loads" but is corrupted, the exact failure class
           documented in this file's own history: a bad conversion once
           rendered 'S' as something closer to '6'), fall back to
-          fallback_font_path() -- a second, genuinely clean SIL-OFL
-          font (FALLBACK.ttf), same sanity check applied to it too.
+          fallback_font_path() -- the previous project font, if it was
+          converted locally; apply the same sanity check to it too.
        3. If even that's unavailable, draw_label()/label_text_width()/
           label_text_height() all fall back to libg15render's own
           built-in stock font whenever label_font is NULL, so the app
@@ -1706,6 +2101,7 @@ int main(int argc, char **argv) {
         g15canvas canvas;
         g15r_initCanvas(&canvas);
         update_net_speed();
+        update_nvidia_stats();
         update_media_info();
         viz_set_preview_placeholder();
         if (screen == 1) draw_clock_screen(&canvas);
@@ -1739,6 +2135,7 @@ int main(int argc, char **argv) {
         time_t now_t = time(NULL);
         if (difftime(now_t, last_slow_update) >= 1.0) {
             update_net_speed();
+            update_nvidia_stats();
             update_media_info();
             last_slow_update = now_t;
         }

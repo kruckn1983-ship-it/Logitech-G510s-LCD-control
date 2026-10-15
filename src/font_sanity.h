@@ -30,8 +30,9 @@ static const char LABEL_SANITY_CHARS[] = "ACDEGHIKLMNOPRSTUVWXZ2";
    glyph once rendered as something closer to '6') -- this check
    guards against a font that's more badly broken than that (missing
    glyphs, implausible metrics), not necessarily that exact subtle
-   case, which is why a second, genuinely-clean fallback font
-   (FALLBACK.ttf) exists as well, not just this check alone. */
+   case, which is why the bundled, openly licensed Liberation Sans Bold
+   font (FALLBACK.ttf) is the default rather than trusting a legacy
+   conversion solely because its metrics look plausible. */
 static int label_font_is_sane(g15font *font) {
     if (!font) return 0;
     if (font->font_height == 0 || font->font_height > 32) return 0;

@@ -15,7 +15,7 @@ cd Logitech-G510s-LCD-control
 ./install.sh
 ```
 
-`install.sh` kümmert sich um alle Abhängigkeiten. Das Skript meldet jeweils, was bereits installiert ist und was noch hinzukommt – `pacman` wird nie still im Hintergrund ausgeführt. Außerdem baut es den LCD-Treiber, konvertiert die Beschriftungsschriftart, richtet die systemd-Dienste ein und erstellt Desktop-Verknüpfungen. Das Skript kann gefahrlos erneut ausgeführt werden. Einmalig werden das `sudo`-Passwort (für udev-Regeln und Paketinstallationen) und das Ab- und erneute Anstecken der Tastatur benötigt, damit die Regeln wirksam werden.
+`install.sh` kümmert sich um alle Abhängigkeiten. Das Skript meldet jeweils, was bereits installiert ist und was noch hinzukommt – `pacman` wird nie still im Hintergrund ausgeführt. Außerdem baut es den LCD-Treiber, konvertiert die Beschriftungsschriftart, richtet die systemd-Dienste ein und erstellt Desktop-Verknüpfungen. Für den Gerätezugriff richtet es die dedizierte Gruppe `g510` ein und fügt den angemeldeten Benutzer hinzu, falls nötig. Bei einer erstmaligen Gruppenaufnahme musst du dich ab- und wieder anmelden und `install.sh` danach erneut starten. Das Skript kann gefahrlos erneut ausgeführt werden. Einmalig werden das `sudo`-Passwort (für udev-Regeln und Paketinstallationen) und das Ab- und erneute Anstecken der Tastatur benötigt, damit die Regeln wirksam werden.
 
 Installierte Pakete und ihre Aufgaben:
 
@@ -28,7 +28,9 @@ Installierte Pakete und ihre Aufgaben:
 | `playerctl` | Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums für die Mediensensoren |
 | `libg15`, `libg15render` (AUR, über `yay`/`paru`) | Bibliothek für das Pixel- und Bildformat des LCDs |
 
-`install.sh` kann keinen AUR-Helfer installieren. Installiere zuerst `yay` oder `paru`, falls noch keiner vorhanden ist, und führe danach `install.sh` aus.
+`install.sh` kann keinen AUR-Helfer installieren. Installiere zuerst `yay` oder `paru`, falls noch keiner vorhanden ist, und führe danach `install.sh` aus. Der Dienst `ydotool.service` ist ein Systemdienst und wird deshalb mit `sudo systemctl` gestartet; die LCD-, Tasten- und Makrodienste der Anwendung laufen weiterhin ohne Root-Rechte als Benutzer.
+
+CPU- und GPU-Sensoren werden über ihre Hardwaretreiber und Sensorbezeichnungen erkannt, nicht über feste `hwmon`-Nummern. NVIDIA-Telemetrie wird optional über `nvidia-smi` gelesen; nicht verfügbare Werte wie GPU-Hotspot oder VRAM-Temperatur werden als „N/A“ angezeigt. Netzwerkdurchsatz folgt der aktiven Standardroute. Das Arch-Paket legt die Gruppe `g510` an; füge deinen Benutzer mit `sudo usermod -aG g510 "$USER"` hinzu und melde dich anschließend erneut an.
 
 **Installation überprüfen:**
 
@@ -36,7 +38,7 @@ Installierte Pakete und ihre Aufgaben:
 systemctl --user status g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
 ```
 
-Alle drei Dienste sollten `active (running)` anzeigen. Falls das LCD nicht sofort aufleuchtet, trenne die Tastatur kurz vom Rechner und schließe sie wieder an.
+Alle drei Dienste sollten `active (running)` anzeigen. Der Dienst zur Wiederherstellung der Beleuchtungsfarbe ist ein einmaliger Anmeldedienst und wird nach erfolgreicher Ausführung als `inactive (dead)` angezeigt. Falls das LCD nicht sofort aufleuchtet, trenne die Tastatur kurz vom Rechner und schließe sie wieder an.
 
 **Enthaltene Funktionen:**
 
@@ -46,6 +48,8 @@ Alle drei Dienste sollten `active (running)` anzeigen. Falls das LCD nicht sofor
 - Editor für eigene Bildschirme: Sensoren, Bilder und Text auf L2–L5 platzieren; L1 zeigt zusätzlich eine analoge Uhr
 - Kleiner Winamp auf der Tastatur: animierte Equalizer-Balken sowie Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums
 - Läuft ohne Root-Rechte unter dem normalen Benutzerkonto, startet bei der Anmeldung und übersteht Neustarts
+- Stellt die zuletzt verwendete LCD-Ansicht und die gespeicherte Beleuchtungsfarbe nach einem Neustart wieder her
+- Verwendet die für das Display entwickelte G15-Pixel-Schrift für Text und Zahlen; die Beschriftungen der Standardanzeige nutzen die klare, frei lizenzierte Liberation Sans Bold
 
 ![G510s-Steuerungsanwendung – v1](docs/screenshots/g510s-control-v1.png)
 
@@ -57,7 +61,7 @@ Der Visualizer greift nicht gezielt auf Spotify, den Browser oder eine bestimmte
 
 ## Funktionsweise
 
-Die PyQt5-Anwendung `g510_app.py` kommuniziert direkt mit `/dev/g510-lcd` und `/dev/g510-keys`. Sie verwendet stabile symbolische Verknüpfungen statt unzuverlässiger Gerätenummern und ist nicht auf `g15daemon` angewiesen, dessen Tastenzuordnungen für dieses Modell falsch sind. Die Anwendung läuft unauffällig als drei systemd-Dienste des Benutzers.
+Die PyQt5-Anwendung `g510_app.py` kommuniziert direkt mit `/dev/g510-lcd` und `/dev/g510-keys`. Sie verwendet stabile symbolische Verknüpfungen statt unzuverlässiger Gerätenummern und ist nicht auf `g15daemon` angewiesen, dessen Tastenzuordnungen für dieses Modell falsch sind. LCD, Tasten und Makros laufen als drei systemd-Benutzerdienste; nur `ydotool.service` für synthetische Tastatureingaben ist ein Systemdienst.
 
 ## Projektstatus
 

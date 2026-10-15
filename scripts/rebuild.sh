@@ -19,7 +19,6 @@ convert_font() {
         g15fontconvert -s 8 -i "$1" -o "$2"
     fi
 }
-convert_font "$PROJECT_DIR/fonts/source-ttf/FONT.otf" "$PROJECT_DIR/fonts/lcd-label-8.fnt"
 convert_font "$PROJECT_DIR/fonts/source-ttf/FALLBACK.ttf" "$PROJECT_DIR/fonts/lcd-label-8-fallback.fnt"
 
 echo "Building g510_lcd_stats..."

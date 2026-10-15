@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <linux/input.h>
+#include <sys/stat.h>
 
 #define NUM_SCREENS 2
 
@@ -22,6 +23,27 @@ static const char *screen_state_path(void) {
     return path;
 }
 
+static const char *persistent_screen_state_path(void) {
+    static char path[256];
+    const char *home = getenv("HOME");
+    snprintf(path, sizeof(path), "%s/.local/share/g510-lcd/active_screen",
+             home ? home : "/tmp");
+    return path;
+}
+
+static void mkdir_p(const char *path) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 static const char *key_name(int code) {
     switch (code) {
         case 696: return "L1";
@@ -34,19 +56,50 @@ static const char *key_name(int code) {
 }
 
 static int read_screen(void) {
-    FILE *f = fopen(screen_state_path(), "r");
-    if (!f) return 0;
-    int s = 0;
-    fscanf(f, "%d", &s);
-    fclose(f);
-    return s;
+    const char *paths[] = {
+        screen_state_path(),
+        persistent_screen_state_path()
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        int s = -1;
+        char extra;
+        int valid = fscanf(f, "%d %c", &s, &extra) == 1 && s >= 0 && s <= 5;
+        fclose(f);
+        if (valid) return s;
+    }
+    return 0;
 }
 
 static void write_screen(int s) {
-    FILE *f = fopen(screen_state_path(), "w");
-    if (!f) return;
-    fprintf(f, "%d", s);
-    fclose(f);
+    if (s < 0 || s > 5) {
+        fprintf(stderr, "g510-lcd-buttons: refusing invalid screen number %d\n", s);
+        return;
+    }
+
+    const char *paths[] = {
+        screen_state_path(),
+        persistent_screen_state_path()
+    };
+    const char *home = getenv("HOME");
+    char data_dir[256];
+    snprintf(data_dir, sizeof(data_dir), "%s/.local/share/g510-lcd",
+             home ? home : "/tmp");
+    mkdir_p(data_dir);
+
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        FILE *f = fopen(paths[i], "w");
+        if (!f) {
+            perror(paths[i]);
+            continue;
+        }
+        int write_failed = fprintf(f, "%d\n", s) < 0;
+        if (fclose(f) != 0) write_failed = 1;
+        if (write_failed) {
+            perror(paths[i]);
+        }
+    }
 }
 
 static void log_button(const char *name) {

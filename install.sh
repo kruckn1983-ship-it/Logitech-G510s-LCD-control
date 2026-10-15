@@ -10,6 +10,24 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
+echo "=== G510-Gerätegruppe ==="
+if [ "$INSTALL_USER" != "$(id -un)" ]; then
+    echo "Bitte install.sh ohne sudo starten; das Skript fordert sudo nur für Systemänderungen an."
+    exit 1
+fi
+if ! getent group g510 >/dev/null; then
+    sudo groupadd --system g510
+fi
+if ! id -nG | tr ' ' '\n' | grep -Fxq g510; then
+    sudo usermod -aG g510 "$INSTALL_USER"
+    echo "  $INSTALL_USER wurde der Gruppe g510 hinzugefügt."
+    echo "  Bitte ab- und wieder anmelden und install.sh anschließend erneut starten,"
+    echo "  damit die Benutzer-Dienste die neuen Geräteberechtigungen erhalten."
+    exit 0
+fi
+echo "  $INSTALL_USER ist Mitglied der Gruppe g510."
+
 echo "=== 1/7: Official repo packages ==="
 # Real per-package [ok]/[missing] reporting -- never a silent pacman
 # black box. Only actually-missing packages get installed.
@@ -55,9 +73,9 @@ fi
 
 echo "=== 3/7: Convert the label fonts ==="
 # Both fonts ship in the repo (fonts/source-ttf/) -- this used to be a
-# manual step ("get your own copy of a commercial font, then run
-# g15fontconvert by hand"). Not anymore: both are bundled and this
-# converts them automatically every run (matches this file's own
+# manual step ("get your own copy of a font, then run g15fontconvert
+# by hand"). The bundled, openly licensed label font is converted
+# automatically every run (matches this file's own
 # "every step just overwrites" policy, and self-heals if a corrupted
 # .fnt ever triggers the runtime sanity-check fallback in
 # g510_lcd_stats.c -- see font_sanity.h).
@@ -73,8 +91,7 @@ convert_font() {
         g15fontconvert -s 8 -i "$1" -o "$2"
     fi
 }
-convert_font "$DIR/fonts/source-ttf/FONT.otf" "$DIR/fonts/lcd-label-8.fnt" "the primary label font"
-convert_font "$DIR/fonts/source-ttf/FALLBACK.ttf" "$DIR/fonts/lcd-label-8-fallback.fnt" "the fallback label font"
+convert_font "$DIR/fonts/source-ttf/FALLBACK.ttf" "$DIR/fonts/lcd-label-8-fallback.fnt" "the default Liberation Sans Bold label font"
 
 echo "=== 4/7: Compile the C programs ==="
 if ! command -v gcc &>/dev/null || ! command -v pkg-config &>/dev/null; then
@@ -102,7 +119,8 @@ echo "=== 5/7: udev rules + hwdb (needs sudo) ==="
 # never needs to know which install method put it there.
 sudo mkdir -p /usr/lib/g510-lcd
 sudo cp scripts/restore-backlight.sh /usr/lib/g510-lcd/restore-backlight.sh
-sudo chmod 755 /usr/lib/g510-lcd/restore-backlight.sh
+sudo cp scripts/restore-backlight-user.sh /usr/lib/g510-lcd/restore-backlight-user.sh
+sudo chmod 755 /usr/lib/g510-lcd/restore-backlight.sh /usr/lib/g510-lcd/restore-backlight-user.sh
 # The checked-in rule no longer has any __PROJECT_DIR__ placeholder to
 # substitute (the one that used to need it, the backlight-restore
 # line, now points at the fixed path above) -- this sed is harmless
@@ -131,12 +149,12 @@ read -p "Press Enter once you've replugged the keyboard..."
 
 echo "=== 6/7: systemd --user services ==="
 mkdir -p ~/.config/systemd/user
-for svc in g510-lcd-stats g510-lcd-buttons g510-macro-daemon; do
+for svc in g510-lcd-stats g510-lcd-buttons g510-macro-daemon g510-backlight-restore; do
     sed "s|__PROJECT_DIR__|$DIR|g" "services/$svc.service" > ~/.config/systemd/user/"$svc.service"
 done
 systemctl --user daemon-reload
-systemctl --user enable --now ydotool.service
-systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
+sudo systemctl enable --now ydotool.service
+systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service g510-backlight-restore.service
 
 echo "=== 7/7: Desktop shortcuts ==="
 # Generated fresh from the resolved $DIR every run -- a clean clone used to

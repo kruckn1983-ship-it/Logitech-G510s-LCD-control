@@ -21,9 +21,10 @@ Das PKGBUILD von `packaging/g910-control` installiert seine `.py`-Dateien direkt
 
 - `/usr/bin/g510-lcd` – schlanker Starter, der das eigentliche Skript mit `exec` ausführt
 - `/usr/lib/g510-lcd/src/*.py` und kompilierte `*.c`-Programme – gleiche Struktur wie ein geklontes Repository, nicht abgeflacht
-- `/usr/lib/systemd/user/g510-lcd-stats.service`, `g510-lcd-buttons.service` und `g510-macro-daemon.service`
+- `/usr/lib/systemd/user/g510-lcd-stats.service`, `g510-lcd-buttons.service`, `g510-macro-daemon.service` und `g510-backlight-restore.service`
 - `/usr/lib/udev/rules.d/99-g510-lcd.rules` – bytegenau wie die eingecheckte Quelldatei installiert (siehe die inzwischen behobene Lücke weiter unten)
 - `/usr/lib/g510-lcd/restore-backlight.sh` – von udev aufgerufener Starter zum Wiederherstellen der Beleuchtung (siehe unten)
+- `/usr/lib/g510-lcd/restore-backlight-user.sh` – stellt die gespeicherte Beleuchtungsfarbe zusätzlich bei der Benutzeranmeldung wieder her
 - `/usr/share/applications/g510-lcd.desktop`
 - `/usr/share/licenses/g510-lcd/LICENSE`
 
@@ -41,17 +42,17 @@ Die Prüfung erfolgte auf dem echten Rechner und nicht nur durch Lesen: Das Skri
 
 Ein kleiner, aber wichtiger Hinweis: Wenn beide Installationsarten gleichzeitig vorhanden sind (wie derzeit auf diesem Rechner), betrachtet `pacman` `/usr/lib/g510-lcd/` nach Installation dieses PKGBUILD als paketverwaltet. Das `sudo cp` von `install.sh` in denselben Pfad verändert dann Dateien außerhalb der pacman-Verwaltung. In der Praxis ist das unproblematisch, weil beide Verfahren dieselben Dateien kopieren. Trotzdem sollte `pacman -Qkk g510-lcd` auf einem Rechner, auf dem auch `install.sh` ausgeführt wurde, nicht als alleinige Wahrheitsquelle behandelt werden.
 
-## Behoben: Beschriftungsschriftart
+## Beschriftungsschriftart
 
-Es gilt dieselbe Einschränkung wie bei `install.sh`: Eurostile Bold ist kommerziell lizenziert und darf nicht im Paket weitergegeben werden. `g510_lcd_stats` benötigt weiterhin eine konvertierte Kopie an einem passenden Ort. Die Anwendung prüft jetzt zuerst `~/.local/share/g510-lcd/fonts/lcd-label-8.fnt` – unabhängig von der Installationsart ein benutzerschreibbarer Pfad – und greift erst danach auf den alten Pfad relativ zu `PROJECT_DIR` zurück. Bei einer Paketinstallation benötigt die manuelle Konvertierung somit kein `sudo`; sie ist genauso unkompliziert wie bei einem geklonten Repository.
+Die Paketierung konvertiert und installiert Liberation Sans Bold als Standardschrift für die Beschriftungen des Statistikbildschirms. Die Schrift ist unter der SIL Open Font License frei weitergebbar. Eine persönliche Schrift kann weiterhin unter `~/.local/share/g510-lcd/fonts/lcd-label-8.fnt` abgelegt werden und hat Vorrang. Zahlen und Text auf eigenen Bildschirmen verwenden die G15-Bitmap-Schriften, die für das LCD entwickelt wurden.
 
-Die Überprüfung erfolgte schrittweise: Nach dem Neubau des Programms wurden alle drei isolierten Fälle geprüft – Schriftart nur am alten Pfad, nur am neuen Pfad oder an keinem der beiden Orte. Alle verhielten sich wie vorgesehen; auch im Fehlerfall erschien weiterhin dieselbe verständliche Meldung. Zusätzlich wurde die auf dem echten Rechner installierte Paketversion geprüft, die vor dieser Korrektur erstellt worden war: Sie schlug erwartungsgemäß mit der dokumentierten Meldung fehl, da ihr kompiliertes Programm nur den alten `PROJECT_DIR`-Pfad kannte. Die konvertierte Schrift wurde anschließend ohne `sudo` nach `~/.local/share/g510-lcd/fonts/` kopiert. Damit ist sie bereit, sobald das mit der Korrektur neu erstellte Paket installiert wird – das war zum Zeitpunkt dieser Notiz noch nicht geschehen.
+Das PKGBUILD legt die dedizierte Gerätegruppe `g510` über eine `sysusers.d`-Datei an. Füge den Benutzer mit `sudo usermod -aG g510 "$USER"` hinzu und melde dich danach neu an. Das Paket aktiviert Dienste nicht automatisch: Starte zuerst den systemweiten ydotool-Dienst mit `sudo systemctl enable --now ydotool.service`, danach die gewünschten Benutzerdienste, etwa mit `systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service g510-backlight-restore.service`. Nur `ydotool.service` läuft systemweit; die G510s-Anwendung selbst läuft ohne Root-Rechte.
 
-Das korrigierte Paket wurde wie der übrige Inhalt dieser Datei neu erstellt und inhaltlich überprüft. **Die Installation dieses konkreten Pakets auf dem echten Rechner, um genau diese Korrektur zu übernehmen, steht aber noch aus.**
+Der bisherige Pakettest bezog sich auf den älteren Paketstand. Die Änderungen an Standardschrift, Schriftlizenz, Bildschirmwahl und Anmelde-Wiederherstellung wurden hier noch nicht mit `makepkg` gebaut oder auf der echten Tastatur installiert.
 
 ## Was in diesem Durchlauf tatsächlich überprüft wurde
 
-1. `makepkg` wurde mit einem echten Tarball ausgeführt: zunächst mit einem für schnelle Iterationen manuell aus dem Arbeitsverzeichnis erstellten Tarball, während unten ein echter Fehler behoben wurde, und anschließend mit einem echten `git archive` des HEADs von `g510s-dev`. Letzteres entspricht dem in der README von `g910-control` beschriebenen Verfahren; da keine der Anwendungen ein echtes öffentliches Tag hat, lässt sich so trotzdem aus einer realen Quelle bauen. Beide Builds liefen ohne Fehler oder Warnungen.
+1. Frühere `makepkg`-Prüfungen bezogen sich auf einen älteren Paketstand. Das aktuelle PKGBUILD muss nach den jüngsten Änderungen erneut gebaut werden.
 2. Das erstellte `.pkg.tar.zst` wurde entpackt und alle Dateien mit eingesetzten Pfaden manuell geprüft: der Starter `/usr/bin/g510-lcd`, die `ExecStart=`-Zeilen aller drei systemd-Dienste und die udev-Regel. Letztere ist jetzt bytegenau mit der Quelle identisch; das wurde mit `diff` bestätigt.
 3. `strings` bestätigte, dass das kompilierte `g510_lcd_stats` den Pfad `/usr/lib/g510-lcd` enthält.
 4. Alle Dateien im erstellten Paket (nicht nur der Quellcode) wurden auf persönliche Kennungen geprüft. Einzige Treffer waren die Felder `builddir` und `startdir` in `.BUILDINFO`, die den Buildspeicherort festhalten. Dieser Build lief in einem temporären Verzeichnis unter dem Home-Verzeichnis des Benutzers. Das ist kein Fehler im PKGBUILD: Ein echter AUR-Build oder ein Build unter `/tmp` würde diese Angaben nicht enthalten. Der Umstand ist der Vollständigkeit halber dokumentiert.
@@ -59,7 +60,7 @@ Das korrigierte Paket wurde wie der übrige Inhalt dieser Datei neu erstellt und
 
 ## Was noch wirklich aussteht
 
-- **Die Korrekturen für Schriftart und Wiederherstellung der Beleuchtung** sind in einem neu gebauten, isoliert getesteten Paket enthalten. Das aktuell auf dem echten Rechner installierte Paket ist jedoch älter und enthält beide Korrekturen nicht. Es muss mit `sudo pacman -U` erneut installiert werden, damit die reale Installation aktualisiert wird. Dieser Schritt wurde in diesem Durchlauf nicht vorgenommen, da er dieselbe direkte Benutzeraktion erfordert hatte wie die erste Installation.
+- **Das aktuelle PKGBUILD erneut bauen und testen.** Die neue Standardschrift, die zusätzliche Anmeldeeinheit und die dauerhafte Bildschirmwahl wurden noch nicht in einem Paket oder auf echter Hardware überprüft.
 - **Die Paketdienste vollständig starten und durchtesten** – LCD, Tasten und Makros müssen tatsächlich aus `/usr/lib/g510-lcd/` funktionieren, nicht nur auf den Aufruf von `--preview` reagieren. Dieser Test wurde ausgelassen, damit die laufenden Entwicklungsdienste nicht versehentlich gestört werden.
 - **`namcap`** ist auf diesem Rechner nicht installiert. Der Prüfschritt wurde daher ausgelassen und nicht einfach als fehlerfrei angenommen.
 - **`sha256sums=SKIP`** ist vorläufig wegen der privaten Quelle und des fehlenden öffentlichen Tags gesetzt; derselbe Umstand ist in `G510_PLAN_A.md`, Phase 4, dokumentiert. Vor jeder AUR-Einreichung muss ein echter Prüfsummenwert eingetragen werden.

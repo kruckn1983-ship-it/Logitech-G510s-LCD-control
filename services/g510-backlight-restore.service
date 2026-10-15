@@ -1,0 +1,10 @@
+[Unit]
+Description=Restore saved G510s keyboard backlight color
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/g510-lcd/restore-backlight-user.sh
+
+[Install]
+WantedBy=default.target

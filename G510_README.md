@@ -64,9 +64,9 @@ Die Anwendung verwandelt das eingebaute LCD der Logitech G510s in eine Live-Anze
 | `g510-lcd-stats.service` | systemd-Benutzerdienst für das Statistikprogramm. |
 | `g510-lcd-buttons.service` | systemd-Benutzerdienst für die Tasten. |
 | `99-g510-lcd.rules` | udev-Regeln, siehe „Dauerhafte Einrichtung“. |
-| `fonts/lcd-label-8.fnt` | Konvertierte Schriftart für LCD-Beschriftungen, die tatsächlich verwendet wird; siehe „Schriften“. |
+| `fonts/lcd-label-8.fnt` | Vorherige/benutzerdefinierte Schrift für LCD-Beschriftungen; als persönlicher Override weiterhin verwendbar. |
 | `fonts/source-ttf/FONT.otf` | Quelldatei für `lcd-label-8.fnt`, eingecheckt im Repository. Die eingebetteten Metadaten verweisen auf eine Adobe-Typekit-EULA statt auf eine freie Lizenz. Das Risiko ist bekannt und bewusst akzeptiert. `install.sh` und `scripts/rebuild.sh` konvertieren die Schrift inzwischen automatisch. |
-| `fonts/source-ttf/FALLBACK.ttf` | Liberation Sans Bold unter der SIL Open Font License; wird automatisch verwendet, wenn `FONT.otf` nicht geladen werden kann oder die Prüfung auf beschädigte Glyphen nicht besteht. Siehe `font_sanity.h`. |
+| `fonts/source-ttf/FALLBACK.ttf` | Liberation Sans Bold unter der SIL Open Font License; wird standardmäßig für die Beschriftungen des Statistikbildschirms verwendet. |
 | `set-backlight-color.sh` | Wendet beim Systemstart die gespeicherte Beleuchtungsfarbe an. Die GUI schreibt die Datei bei **Apply** automatisch neu; manuelle Änderungen bleiben daher nicht dauerhaft bestehen. |
 | `rebuild.sh` | Kompiliert beide Programme neu und startet die Dienste. |
 | `view-logs.sh` | Zeigt die Live-Protokolle beider Dienste. |
@@ -154,13 +154,12 @@ python3 -c "import struct; print(struct.unpack('<H', open('FILE.fnt','rb').read(
 
 Passe `-s` an, bis die gewünschte Höhe erreicht ist. Bei einem Zeilenabstand von 10 px sollte die Schrift etwa 8–9 px hoch sein.
 
-Dünne oder normale Schriftstärken werden in dieser geringen Auflösung unleserlich, weil nicht genügend Pixel für feine Linien vorhanden sind. Verwende deshalb nur Bold oder Black. Aktuell werden Beschriftungen mit der beigefügten `fonts/source-ttf/FONT.otf` gezeichnet, die stilistisch der originalen G510s-LCD-Schrift ähnelt. Zahlen verwenden die eingebaute `G15_TEXT_SMALL`-Schrift: Mehrere konvertierte Schriften sahen dafür schlechter aus; die eingebaute Schrift wurde für genau diese Auflösung erstellt.
+Dünne oder normale Schriftstärken werden in dieser geringen Auflösung unleserlich, weil nicht genügend Pixel für feine Linien vorhanden sind. Verwende deshalb nur Bold oder Black. Die Beschriftungen des Statistikbildschirms verwenden standardmäßig die beigefügte Liberation Sans Bold (`FALLBACK.ttf`, 8 px), die bei der Größe klar und gut lesbar bleibt. Eine persönliche konvertierte Schrift kann unter `~/.local/share/g510-lcd/fonts/lcd-label-8.fnt` abgelegt werden. Zahlen und Elemente in eigenen Bildschirmen verwenden weiterhin die eingebauten G15-Pixel-Schriften: Mehrere konvertierte Schriften sahen dafür schlechter aus; die eingebauten Schriften wurden für genau diese Auflösung erstellt.
 
 Bitmap-Schriften im Format `.otb` oder `.pcf` (zum Beispiel Terminus) funktionieren mit `g15fontconvert` nicht. Das Programm erzeugt dabei unbemerkt eine leere oder beschädigte `.fnt`-Datei: `font_height` bleibt unabhängig von `-s` gleich und die Datei ist nahezu leer. Nur skalierbare TTF-/OTF-Konturschriften werden korrekt konvertiert.
 
-**Lizenzhinweis (bekannte und bewusst akzeptierte Entscheidung):** Die eingebetteten Metadaten in `FONT.otf` verweisen auf eine Adobe-Typekit-EULA (`typekit.com/eulas/...`) und nicht auf eine freie Lizenz. Wahrscheinlich war die Datei nicht zur freien Weitergabe bestimmt; sie ist hier dennoch enthalten. Als technische Rückfallebene – nicht als Lizenzkorrektur – liegt zusätzlich `fonts/source-ttf/FALLBACK.ttf` bei (Liberation Sans Bold, tatsächlich unter der SIL Open Font License; Lizenztext in `fonts/source-ttf/FALLBACK.LICENSE.txt`). `g510_lcd_stats` wechselt automatisch zu dieser Schrift, falls `FONT.otf` nicht geladen werden kann oder eine Glyphenprüfung fehlschlägt. Siehe `font_sanity.h` und den Abschnitt über den beschädigten S-Glyphen oben.
-
-`install.sh` und `scripts/rebuild.sh` konvertieren beide Schriften mit `g15fontconvert` automatisch. Das Programm gehört zum AUR-Paket `libg15render`; bei einer Neuinstallation ist kein manueller Schritt erforderlich.
+**Lizenzhinweis:** `FALLBACK.ttf` (Liberation Sans Bold) steht unter der SIL Open Font License; der Lizenztext liegt in `fonts/source-ttf/FALLBACK.LICENSE.txt`. Die frühere `FONT.otf` mit Adobe-Typekit-EULA wird nicht automatisch konvertiert oder in Paketen ausgeliefert. Eine persönliche Schrift kann bei geklärter Lizenz manuell als Benutzer-Override bereitgestellt werden.
+`install.sh`, `scripts/rebuild.sh` und das PKGBUILD konvertieren die frei lizenzierte Standardschrift mit `g15fontconvert` automatisch. Das Programm gehört zum AUR-Paket `libg15render`; bei einer Neuinstallation ist kein manueller Schritt erforderlich.
 
 ## Beleuchtung (RGB-Tastaturbeleuchtung)
 
@@ -176,11 +175,11 @@ Für Farben wird ein Auswahlfeld mit Voreinstellungen (`COLOR_RGB`) statt eines 
 
 `99-g510-lcd.rules` (installiert unter `/etc/udev/rules.d/`) erledigt drei Dinge:
 
-1. Erstellt `/dev/g510-lcd` als stabile symbolische Verknüpfung zur jeweils vergebenen hidraw-Gerätenummer der LCD-USB-Schnittstelle. Diese Nummer kann sich bei Neustarts und erneutem Anstecken ändern; ein konkretes `hidrawN` darf daher nicht fest codiert werden.
+1. Erstellt `/dev/g510-lcd` als stabile symbolische Verknüpfung zur jeweils vergebenen hidraw-Gerätenummer der LCD-USB-Schnittstelle. Diese Nummer kann sich bei Neustarts und erneutem Anstecken ändern; ein konkretes `hidrawN` darf daher nicht fest codiert werden. Die angeschlossene Tastatur wurde als `046d:c22d`, Schnittstelle `01`, verifiziert.
 2. Erstellt auf dieselbe Weise `/dev/g510-keys` für das Eingabegerät der Gaming-Keys.
-3. Ändert beim Erscheinen der Beleuchtungs-LED Gruppen- und Dateiberechtigungen auf die Gruppe `input` (damit zur Laufzeit kein `sudo` nötig ist) und führt `set-backlight-color.sh` aus.
+3. Vergibt für LCD, Gaming-Keys und Beleuchtungs-LEDs gezielte Zugriffsrechte an die dedizierte Gruppe `g510`; die Benutzeroberfläche braucht dadurch kein `sudo`. `install.sh` legt die Gruppe bei Bedarf an und fügt den angemeldeten Benutzer hinzu. Nach einer erstmaligen Gruppenaufnahme ist eine erneute Anmeldung nötig.
 
-Die beiden systemd-Benutzerdienste sind aktiviert und starten bei jeder Anmeldung. `hid_lg_g15`, der benötigte Kernel-Treiber, gehört zum Hauptkernel und ist in jedem Manjaro-Kernelpaket enthalten. Das Projekt hängt daher nicht von einer bestimmten Kernelversion ab.
+Die LCD-, Tasten- und Makroprozesse laufen als Benutzerdienste. `ydotool.service` ist dagegen ein systemweiter Dienst des Pakets `ydotool`, der für die synthetische Tastatureingabe gestartet werden muss; die Anwendung selbst läuft weiterhin ohne Root-Rechte. CPU- und GPU-Temperaturen werden anhand der hwmon-Treibernamen und Sensorlabels erkannt; AMD-Werte kommen aus den passenden DRM/hwmon-Dateien und NVIDIA-Telemetrie optional aus `nvidia-smi`. VRAM wird dynamisch ermittelt. Netzwerkdurchsatz folgt der aktiven Standardroute. Nicht verfügbare Werte werden als `N/A` statt als erfundene Null- oder Temperaturwerte dargestellt. `hid_lg_g15`, der benötigte Kernel-Treiber, gehört zum Hauptkernel und ist in jedem Manjaro-Kernelpaket enthalten. Das Projekt hängt daher nicht von einer bestimmten Kernelversion ab.
 
 **Schaltfläche „Save All Settings Now“:** Auf Wunsch wurde eine sichtbare Speicherfunktion ergänzt, weil der Benutzer nicht darauf vertraute, dass Einstellungen Neustarts überstehen. Jede Änderung – etwa das Verschieben/Skalieren eines Custom-Screens-Elements, **Apply**, **Set as Default** oder eine Makroaufnahme – wurde bereits direkt in `DATA_DIR` gespeichert. Es fehlte kein Speicherpfad, sondern eine sichtbare Bestätigung. Die Schaltfläche in der oberen Werkzeugleiste (in beiden Tabs sichtbar) speichert die aktuelle Custom-Screens-Konfiguration und die Standard-Beleuchtungsfarbe erneut. Danach liest sie beide Dateien wieder ein und vergleicht den Inhalt mit den erwarteten Werten. So wird ein echter Schreib-/Lese-Rundlauf geprüft, statt lediglich anzunehmen, dass der Schreibaufruf erfolgreich war. Das Ergebnis – einschließlich eines Fehlers – erscheint in der Statusleiste.
 
