@@ -7,6 +7,7 @@
 # C programs. Safe to re-run any time -- every step just overwrites/
 # re-applies, nothing accumulates.
 set -e
+export PATH="/usr/local/bin:$PATH"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
@@ -28,48 +29,11 @@ if ! id -nG | tr ' ' '\n' | grep -Fxq g510; then
 fi
 echo "  $INSTALL_USER ist Mitglied der Gruppe g510."
 
-echo "=== 1/7: Official repo packages ==="
-# Real per-package [ok]/[missing] reporting -- never a silent pacman
-# black box. Only actually-missing packages get installed.
-PACMAN_PKGS=(python-pyqt5 python-pillow ydotool python-evdev freetype2 zenity playerctl wmctrl)
-MISSING_PACMAN_PKGS=()
-for pkg in "${PACMAN_PKGS[@]}"; do
-    if pacman -Qi "$pkg" &>/dev/null; then
-        echo "  [ok]      $pkg"
-    else
-        echo "  [missing] $pkg"
-        MISSING_PACMAN_PKGS+=("$pkg")
-    fi
-done
-if [ ${#MISSING_PACMAN_PKGS[@]} -gt 0 ]; then
-    sudo pacman -S --needed --noconfirm "${MISSING_PACMAN_PKGS[@]}"
-else
-    echo "  All official-repo packages already installed."
-fi
+echo "=== 1/7: Systempakete (Arch/Manjaro, Fedora/Nobara, Debian/Ubuntu/Mint) ==="
+"$DIR/scripts/install-deps.sh"
 
-echo "=== 2/7: AUR packages (libg15, libg15render -- needs yay) ==="
-AUR_PKGS=(libg15 libg15render)
-MISSING_AUR_PKGS=()
-for pkg in "${AUR_PKGS[@]}"; do
-    if pacman -Qi "$pkg" &>/dev/null; then
-        echo "  [ok]      $pkg"
-    else
-        echo "  [missing] $pkg"
-        MISSING_AUR_PKGS+=("$pkg")
-    fi
-done
-if [ ${#MISSING_AUR_PKGS[@]} -gt 0 ]; then
-    if ! command -v yay &>/dev/null; then
-        echo "yay not found, and these AUR packages are missing: ${MISSING_AUR_PKGS[*]}"
-        echo "Install an AUR helper first (https://github.com/Jguer/yay -- or paru/"
-        echo "whatever you prefer), then re-run this script -- or install these"
-        echo "two manually yourself, then re-run."
-        exit 1
-    fi
-    yay -S --needed --noconfirm "${MISSING_AUR_PKGS[@]}"
-else
-    echo "  All AUR packages already installed."
-fi
+echo "=== 2/7: G510s-Treiber (libg15 + libg15render aus mitgeliefertem Quellcode) ==="
+"$DIR/scripts/install-driver.sh"
 
 echo "=== 3/7: Convert the label fonts ==="
 # Both fonts ship in the repo (fonts/source-ttf/) -- this used to be a
@@ -95,12 +59,6 @@ convert_font "$DIR/fonts/source-ttf/FONT.otf" "$DIR/fonts/lcd-label-8.fnt" "the 
 convert_font "$DIR/fonts/source-ttf/FALLBACK.ttf" "$DIR/fonts/lcd-label-8-fallback.fnt" "the fallback label font"
 
 echo "=== 4/7: Compile the C programs ==="
-if ! command -v gcc &>/dev/null || ! command -v pkg-config &>/dev/null; then
-    echo "  [missing] build tools (gcc/pkg-config)"
-    sudo pacman -S --needed --noconfirm base-devel pkgconf
-else
-    echo "  [ok]      build tools (gcc, pkg-config)"
-fi
 # g510_lcd_stats needs the same FreeType/TTF flags libg15render.so itself
 # was built with -- without them, g15canvas's struct layout mismatches
 # between this program and the library, corrupting stack memory (this
@@ -108,7 +66,7 @@ fi
 # -DPROJECT_DIR bakes in THIS checkout's absolute path so the binary
 # can find its own font/config files without any file in the repo
 # itself hardcoding a username or machine-specific location.
-gcc $(pkg-config --cflags freetype2) -DPROJECT_DIR="\"$DIR\"" src/g510_lcd_stats.c -o src/g510_lcd_stats -lg15render $(pkg-config --libs freetype2) -lm
+gcc -I/usr/local/include $(pkg-config --cflags freetype2) -DPROJECT_DIR="\"$DIR\"" src/g510_lcd_stats.c -o src/g510_lcd_stats -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lg15render $(pkg-config --libs freetype2) -lm
 gcc src/g510_lcd_buttons.c -o src/g510_lcd_buttons
 
 echo "=== 5/7: udev rules + hwdb (needs sudo) ==="
@@ -145,7 +103,9 @@ if [ ! -f "$HOME/.local/share/g510-lcd/set-backlight-color.sh" ]; then
 fi
 
 echo "NOTE: unplug and replug the keyboard now so these fully apply."
-read -p "Press Enter once you've replugged the keyboard..."
+if [ -t 0 ] && [ -z "$G510_NONINTERACTIVE" ]; then
+    read -p "Tastatur jetzt aus- und wieder einstecken, danach Enter drücken..."
+fi
 
 echo "=== 6/7: systemd --user services ==="
 mkdir -p ~/.config/systemd/user
@@ -153,7 +113,7 @@ for svc in g510-lcd-stats g510-lcd-buttons g510-macro-daemon; do
     sed "s|__PROJECT_DIR__|$DIR|g" "services/$svc.service" > ~/.config/systemd/user/"$svc.service"
 done
 systemctl --user daemon-reload
-sudo systemctl enable --now ydotool.service
+sudo systemctl enable --now ydotool.service 2>/dev/null || systemctl --user enable --now ydotool.service 2>/dev/null || echo "  Hinweis: ydotool-Dienst nicht gefunden - Makros brauchen ydotoold (siehe Anleitung)."
 systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
 
 echo "=== 7/7: Desktop shortcuts ==="

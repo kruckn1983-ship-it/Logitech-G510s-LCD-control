@@ -27,9 +27,9 @@ Installierte Pakete und ihre Aufgaben:
 | `zenity` | Bestätigungsdialog beim Neustart über die Desktop-Verknüpfung |
 | `playerctl` | Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums für die Mediensensoren |
 | `wmctrl` | Fenstertitel als Ersatz für generische Audiostream-Namen, etwa bei Spielen ohne MPRIS |
-| `libg15`, `libg15render` (AUR, über `yay`/`paru`) | Bibliothek für das Pixel- und Bildformat des LCDs |
+| `libg15`, `libg15render` | LCD-Treiber; Quellcode liegt unter `drivers/` und wird beim Installieren nach `/usr/local` gebaut (kein AUR nötig) |
 
-`install.sh` kann keinen AUR-Helfer installieren. Installiere zuerst `yay` oder `paru`, falls noch keiner vorhanden ist, und führe danach `install.sh` aus.
+Unterstützt werden Arch/Manjaro, Fedora/Nobara und Debian/Ubuntu/Mint (Paketnamen siehe `scripts/install-deps.sh`). Ein fertiges Installationsmedium (`.run`, `.tar.gz`, `.iso`) wird bei jeder Änderung automatisch gebaut – siehe [INSTALLATION.md](INSTALLATION.md).
 
 **Installation überprüfen:**
 

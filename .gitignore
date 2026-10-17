@@ -24,3 +24,6 @@ macros.json
 
 # Claude Code's own worktree bookkeeping -- not project content
 .claude/
+
+# Automatisch gebautes Installationsmedium (scripts/build-installer.sh)
+dist/
