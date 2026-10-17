@@ -263,10 +263,10 @@ COLOR_RGB = {
 
 # Standardbelegung der Tasten L2-L5 (Vorlage pro Taste)
 DEFAULT_SCREEN_PRESETS = {
-    "L2": "performance",
-    "L3": "temperatures",
-    "L4": "network",
-    "L5": "media",
+    "L2": "system",
+    "L3": "media",
+    "L4": "temperatures",
+    "L5": "network",
 }
 
 # Profile: LED-Farbe + anzuzeigender LCD-Bildschirm (0 = Statistik, 2-5 = L2-L5)
@@ -277,21 +277,22 @@ PROFILES = {
 }
 
 PRESET_NAMES = {
-    "performance": "CPU / GPU performance",
-    "temperatures": "Temperature overview",
-    "system": "System overview",
-    "network": "Network, disks & clock",
-    "media": "Media player",
+    "performance": "CPU-/GPU-Auslastung",
+    "temperatures": "Temperaturübersicht",
+    "system": "Systemübersicht",
+    "network": "Netzwerk, Laufwerke und Uhr",
+    "media": "Medienwiedergabe",
 }
 
 
 def build_layout_preset(preset):
     """Liefert die Elementliste einer Dashboard-Vorlage."""
-    def sensor(key, x, y, style="number", width=40, orientation="horizontal", height=28):
+    def sensor(key, x, y, style="number", width=40, orientation="horizontal",
+               height=28, font_size=0):
         element = {
             "kind": "sensor", "sensor": key, "style": style,
             "orientation": orientation, "x": x, "y": y,
-            "width": width, "height": height, "font_size": 0,
+            "width": width, "height": height, "font_size": font_size,
         }
         if key in DATETIME_FORMAT_DEFAULTS:
             element["format"] = DATETIME_FORMAT_DEFAULTS[key]
@@ -303,44 +304,44 @@ def build_layout_preset(preset):
             for core in range(8)
         ]
         elements.extend([
-            sensor("GPU_EDGE_TEMP", 80, 8),
-            sensor("GPU_PCT", 104, 17, "bar", 10, "vertical", 24),
-            sensor("RAM_PCT", 117, 1, "bar", 6),
-            sensor("NET_UP", 117, 20),
-            sensor("NET_DOWN", 117, 31),
+            {**sensor("GPU_EDGE_TEMP", 82, 1), "label": "GPU"},
+            {**sensor("GPU_PCT", 82, 14, "bar", 28), "label": "GPU"},
+            {**sensor("RAM_PCT", 82, 29, "bar", 28), "label": "RAM"},
             {"kind": "text", "content": "CPU", "x": 0, "y": 1, "font_size": 0},
-            {"kind": "text", "content": "GPU", "x": 80, "y": 1, "font_size": 0},
         ])
     elif preset == "temperatures":
         elements = [
-            sensor("CPU_TEMP", 2, 2),
-            sensor("GPU_EDGE_TEMP", 82, 2),
-            sensor("MAXTEMP", 2, 23),
-            sensor("GPU_HOTSPOT_TEMP", 82, 23),
-            sensor("GPU_VRAM_TEMP", 2, 32),
+            {**sensor("CPU_TEMP", 2, 2, font_size=1), "label": "CPU"},
+            {**sensor("GPU_EDGE_TEMP", 82, 2, font_size=1), "label": "GPU"},
+            {**sensor("MAXTEMP", 2, 17, font_size=1), "label": "MAX"},
+            {**sensor("GPU_HOTSPOT_TEMP", 82, 17, font_size=1), "label": "HOT"},
+            {**sensor("GPU_VRAM_TEMP", 2, 32, font_size=1), "label": "VRAM"},
         ]
     elif preset == "network":
         elements = [
-            sensor("NET_DOWN", 2, 2),
-            sensor("NET_UP", 2, 12),
-            sensor("DISK_ROOT_PCT", 2, 24, "bar", 50),
-            sensor("TIME", 100, 2),
-            sensor("DATE", 92, 14),
+            sensor("NET_DOWN", 2, 2, font_size=1),
+            sensor("NET_UP", 2, 14, font_size=1),
+            sensor("DISK_ROOT_PCT", 2, 27, "bar", 45, font_size=0),
+            sensor("TIME", 100, 2, font_size=1),
+            {**sensor("DATE", 100, 14, font_size=1), "format": "eu"},
         ]
     elif preset == "media":
         elements = [
-            sensor("MEDIA_TITLE", 2, 2),
-            sensor("MEDIA_ARTIST", 2, 12),
-            {"kind": "visualizer", "x": 2, "y": 24,
-             "width": DEFAULT_VISUALIZER_WIDTH, "height": DEFAULT_VISUALIZER_HEIGHT},
+            sensor("MEDIA_TITLE", 2, 1, font_size=1),
+            sensor("MEDIA_ARTIST", 2, 11, font_size=0),
+            sensor("MEDIA_ELAPSED", 2, 20, "bar", 65, font_size=0),
+            {"kind": "visualizer", "x": 0, "y": 29,
+             "width": LCD_WIDTH, "height": 14},
         ]
     else:
         elements = [
-            sensor("CPU_PCT", 2, 1, "bar", 34),
-            sensor("RAM_PCT", 2, 14, "bar", 34),
-            sensor("GPU_PCT", 2, 27, "bar", 34),
-            {**sensor("TIME", 100, 2), "label": "TIME"},
-            {**sensor("DATE", 100, 18), "label": "DATE"},
+            sensor("TIME", 2, 0, font_size=2),
+            {**sensor("DATE", 100, 1, font_size=1), "format": "eu"},
+            {**sensor("CPU_TEMP", 2, 15, font_size=2), "label": "CPU"},
+            {**sensor("GPU_EDGE_TEMP", 82, 15, font_size=2), "label": "GPU"},
+            sensor("CPU_PCT", 2, 33, font_size=1),
+            sensor("RAM_PCT", 55, 33, font_size=1),
+            sensor("VRAM_PCT", 108, 33, font_size=1),
         ]
     return elements
 
@@ -1895,18 +1896,18 @@ class CustomScreensTab(QWidget):
         panel_layout.addWidget(add_btn)
 
         self.layout_preset_combo = QComboBox()
-        self.layout_preset_combo.addItem("CPU / GPU performance", "performance")
-        self.layout_preset_combo.addItem("Temperature overview", "temperatures")
-        self.layout_preset_combo.addItem("System overview", "system")
-        self.layout_preset_combo.addItem("Network, disks & clock", "network")
-        self.layout_preset_combo.addItem("Media player", "media")
-        self.layout_preset_combo.setToolTip("Select a ready-made layout for the selected LCD screen.")
+        self.layout_preset_combo.addItem("CPU-/GPU-Auslastung", "performance")
+        self.layout_preset_combo.addItem("Temperaturübersicht", "temperatures")
+        self.layout_preset_combo.addItem("Systemübersicht", "system")
+        self.layout_preset_combo.addItem("Netzwerk, Laufwerke und Uhr", "network")
+        self.layout_preset_combo.addItem("Medienwiedergabe", "media")
+        self.layout_preset_combo.setToolTip("Wähle eine fertige Vorlage für den ausgewählten LCD-Bildschirm.")
         panel_layout.addWidget(self.layout_preset_combo)
-        self.apply_layout_btn = QPushButton("Apply layout preset...")
+        self.apply_layout_btn = QPushButton("Vorlage anwenden...")
         self.apply_layout_btn.setObjectName("PanelButton")
         self.apply_layout_btn.setToolTip(
-            "Replace the selected screen with a dashboard preset. "
-            "You can move and edit every element afterwards."
+            "Ersetzt den ausgewählten Bildschirm durch eine Vorlage. "
+            "Alle Elemente lassen sich anschließend verschieben und bearbeiten."
         )
         self.apply_layout_btn.clicked.connect(self.on_apply_layout_preset)
         panel_layout.addWidget(self.apply_layout_btn)
@@ -1914,7 +1915,7 @@ class CustomScreensTab(QWidget):
         self.apply_default_btn = QPushButton("Standardbelegung L2–L5")
         self.apply_default_btn.setObjectName("PanelButton")
         self.apply_default_btn.setToolTip(
-            "L2 Performance, L3 Temperaturen, L4 Netzwerk/Uhr, L5 Medien.")
+            "L2 Systemübersicht, L3 Medien, L4 Temperaturen, L5 Netzwerk/Uhr.")
         self.apply_default_btn.clicked.connect(self.on_apply_default_layout)
         panel_layout.addWidget(self.apply_default_btn)
 
@@ -2182,7 +2183,7 @@ class CustomScreensTab(QWidget):
         preset = self.layout_preset_combo.currentData()
         answer = QMessageBox.question(
             self,
-            "Apply dashboard preset",
+            "Bildschirmvorlage anwenden",
             f"Replace all elements on {self.current_screen} with the "
             f"{PRESET_NAMES[preset]} layout?",
             QMessageBox.Yes | QMessageBox.No,
