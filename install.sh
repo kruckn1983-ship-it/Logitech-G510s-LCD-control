@@ -129,7 +129,8 @@ mkdir -p "$HOME/Desktop" "$HOME/.local/share/applications"
 
 write_shortcut() {
     # $1=display name  $2=xdg filename stem  $3=Comment  $4=Exec  $5=Icon
-    local entry="[Desktop Entry]
+    local entry="#!/usr/bin/env xdg-open
+[Desktop Entry]
 Type=Application
 Name=$1
 Comment=$3
