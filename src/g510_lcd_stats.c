@@ -799,6 +799,31 @@ static int media_steam_appid_for_game(const char *library, const char *game_dir)
     return cached_appid;
 }
 
+/* Steam/Proton export the app id to every game process, which also covers
+   games installed outside a normal steamapps/common path. */
+static int media_steam_appid_from_environment(int pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/environ", pid);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    static char environment[65536];
+    size_t len = fread(environment, 1, sizeof(environment) - 1, f);
+    fclose(f);
+    environment[len] = 0;
+    static const char *const keys[] = {
+        "SteamAppId=", "STEAM_COMPAT_APP_ID=", "SteamGameId="
+    };
+    for (size_t offset = 0; offset < len; offset += strlen(environment + offset) + 1) {
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            size_t key_len = strlen(keys[i]);
+            if (strncmp(environment + offset, keys[i], key_len) != 0) continue;
+            long appid = strtol(environment + offset + key_len, NULL, 10);
+            if (appid > 0 && appid < 100000000L) return (int)appid;
+        }
+    }
+    return 0;
+}
+
 static int media_process_steam_appid(int pid, char *library, size_t library_size) {
     int found_steam_path = 0;
     for (int depth = 0; pid > 1 && depth < 16; depth++) {
@@ -859,6 +884,9 @@ static int media_process_steam_appid(int pid, char *library, size_t library_size
                 return command_appid;
             }
         }
+
+        int environment_appid = media_steam_appid_from_environment(pid);
+        if (environment_appid > 0) return environment_appid;
 
         snprintf(path, sizeof(path), "/proc/%d/status", pid);
         f = fopen(path, "r");
@@ -1297,6 +1325,12 @@ static const char *custom_screens_path(void) {
     return path;
 }
 
+static const char *game_dashboard_positions_path(void) {
+    static char path[256];
+    snprintf(path, sizeof(path), "%s/game_dashboard_positions.txt", data_dir());
+    return path;
+}
+
 /* An optional removable secondary drive, auto-mounted by udisks2 at
    the standard /run/media/$USER/<label> convention -- <label> is
    whatever the drive's own real filesystem volume label is, which
@@ -1520,15 +1554,27 @@ static void update_media_screen_selection(void) {
     static int playback_active = 0;
     static int media_screen_dismissed = 0;
     static int last_screen = -1;
+    static time_t stopped_since = 0;
     int screen = read_screen();
     int target_screen = g_media_is_game ? GAME_SCREEN : MUSIC_SCREEN;
 
     if (!g_media_playing) {
-        playback_active = 0;
-        media_screen_dismissed = 0;
+        /* Ignore short gaps (track changes); after a few seconds without
+           playback, return from the media/game screen to the default. */
+        time_t now = time(NULL);
+        if (!stopped_since) stopped_since = now;
+        if (playback_active && now - stopped_since >= 5) {
+            if (!media_screen_dismissed
+                    && (screen == MUSIC_SCREEN || screen == GAME_SCREEN)
+                    && write_screen(0))
+                screen = 0;
+            playback_active = 0;
+            media_screen_dismissed = 0;
+        }
         last_screen = screen;
         return;
     }
+    stopped_since = 0;
 
     if (!playback_active) {
         playback_active = 1;
@@ -1987,6 +2033,15 @@ static image_t g_game_logo;
 static int g_game_logo_appid = -1;
 static int g_game_logo_active = 0;
 
+static char g_game_title_lines[4][64];
+static int g_game_title_line_count = 0;
+static int g_game_title_font = G15_TEXT_MED;
+static int g_game_title_line_height = 0;
+static int g_game_title_width = 0;
+static int g_game_title_appid = -1;
+static char g_game_title_source[128] = "";
+static int g_game_title_active = 0;
+
 /* Freeform user text -- not tied to any sensor, direct request: "L3 L4
    L5 have hard coded text i cant edit move do anything with. add an
    option for me to add text fields too" (referring to the "not set up
@@ -2028,6 +2083,7 @@ typedef struct {
 } custom_screen_t;
 
 static custom_screen_t custom_screens[MAX_CUSTOM_SCREENS];
+static int g_preview_editor_mode = 0;
 
 static void decode_config_value(const char *src, char *dst, size_t dst_size) {
     size_t out = 0;
@@ -2241,8 +2297,16 @@ typedef struct {
                       (name)" */
 } element_bounds_t;
 
+typedef struct {
+    element_bounds_t bounds;
+    int anchor_x, anchor_y, base_x, base_y;
+    int present;
+} game_element_bounds_t;
+
 static element_bounds_t g_element_bounds[MAX_ELEMENTS];
 static int g_element_bounds_count = 0;
+static game_element_bounds_t g_game_element_bounds[3];
+static int g_game_element_bounds_count = 0;
 
 static void draw_element(g15canvas *c, element_t *el) {
     const sensor_def_t *def = find_sensor(el->sensor);
@@ -2455,6 +2519,15 @@ static void write_bounds_meta(const char *outpath) {
                     i, b->label_x1, b->label_y1, b->label_x2, b->label_y2, b->value_x2);
         }
     }
+    for (int i = 0; i < g_game_element_bounds_count; i++) {
+        game_element_bounds_t *entry = &g_game_element_bounds[i];
+        if (!entry->present) continue;
+        element_bounds_t *b = &entry->bounds;
+        fprintf(f, "%d label_x1=%d label_y1=%d label_x2=%d label_y2=%d value_x2=%d anchor_x=%d anchor_y=%d base_x=%d base_y=%d\n",
+                MAX_ELEMENTS + i, b->label_x1, b->label_y1, b->label_x2,
+                b->label_y2, b->value_x2, entry->anchor_x, entry->anchor_y,
+                entry->base_x, entry->base_y);
+    }
     fclose(f);
     rename(tmp_path, meta_path);
 }
@@ -2481,65 +2554,167 @@ static void draw_image_element(g15canvas *c, image_t *im) {
     free(data);
 }
 
-static void update_game_logo(void) {
-    g_game_logo_active = 0;
-    if (!g_media_is_game || g_media_game_appid <= 0) return;
-    if (g_game_logo_appid == g_media_game_appid && g_game_logo.width > 0) {
-        g_game_logo_active = 1;
-        return;
+/* Steam keeps the exact, correctly spelled title of every installed game in
+   its manifest, so no artwork or other lookup is needed. */
+static int read_steam_manifest_name(const char *library, int appid,
+                                    char *name, size_t name_size) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/steamapps/appmanifest_%d.acf", library, appid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512], value[256];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), f)) {
+        if (sscanf(line, " \"name\" \"%255[^\"]\"", value) == 1) {
+            snprintf(name, name_size, "%s", value);
+            found = value[0] != 0;
+        }
     }
-    if (g_game_logo_appid == g_media_game_appid) return;
+    fclose(f);
+    return found;
+}
 
-    g_game_logo_appid = g_media_game_appid;
-    g_game_logo.width = 0;
-    g_game_logo.height = 0;
-
-    char cache_dir[640], source[768];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/appcache/librarycache",
-             g_media_game_library);
-    const char *art_names[] = {"logo.png", "library_600x900.jpg", "header.jpg"};
-    source[0] = 0;
-    for (size_t i = 0; i < sizeof(art_names) / sizeof(art_names[0]); i++) {
-        snprintf(source, sizeof(source), "%s/%d/%s", cache_dir,
-                 g_media_game_appid, art_names[i]);
-        if (access(source, R_OK) == 0) break;
-        snprintf(source, sizeof(source), "%s/%d_%s", cache_dir,
-                 g_media_game_appid, art_names[i]);
-        if (access(source, R_OK) == 0) break;
-        source[0] = 0;
+/* The game may live in any Steam library (other drives, Flatpak), so check
+   the library of the running process, the usual Steam roots and every
+   library listed in their libraryfolders.vdf. */
+static int find_steam_game_name(int appid, char *name, size_t name_size) {
+    enum { MAX_ROOTS = 16 };
+    static char roots[MAX_ROOTS][512];
+    int root_count = 0;
+    const char *home = getenv("HOME");
+    if (g_media_game_library[0])
+        snprintf(roots[root_count++], sizeof(roots[0]), "%s", g_media_game_library);
+    if (home && home[0]) {
+        static const char *const home_roots[] = {
+            "%s/.local/share/Steam", "%s/.steam/steam", "%s/.steam/root",
+            "%s/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+        };
+        for (size_t i = 0; i < sizeof(home_roots) / sizeof(home_roots[0]); i++)
+            snprintf(roots[root_count++], sizeof(roots[0]), home_roots[i], home);
     }
-    if (!source[0]) {
-        fprintf(stderr, "g510-lcd-stats: no cached Steam artwork for game %d\n",
-                g_media_game_appid);
-        return;
+    int primary_roots = root_count;
+    for (int i = 0; i < primary_roots; i++) {
+        char vdf_path[640];
+        snprintf(vdf_path, sizeof(vdf_path), "%s/steamapps/libraryfolders.vdf", roots[i]);
+        FILE *vdf = fopen(vdf_path, "r");
+        if (!vdf) continue;
+        char line[1024], library[512];
+        while (root_count < MAX_ROOTS && fgets(line, sizeof(line), vdf)) {
+            if (sscanf(line, " \"path\" \"%511[^\"]\"", library) == 1)
+                snprintf(roots[root_count++], sizeof(roots[0]), "%s", library);
+        }
+        fclose(vdf);
     }
+    for (int i = 0; i < root_count; i++) {
+        if (read_steam_manifest_name(roots[i], appid, name, name_size))
+            return 1;
+    }
+    return 0;
+}
 
-    char logo_dir[256], output[320], relative_path[64];
-    snprintf(logo_dir, sizeof(logo_dir), "%s/game_logos", data_dir());
-    mkdir_p(logo_dir);
-    snprintf(output, sizeof(output), "%s/%d.bin", logo_dir, g_media_game_appid);
-    snprintf(relative_path, sizeof(relative_path), "game_logos/%d.bin",
-             g_media_game_appid);
+static int measure_builtin_text_height(const char *s, int font_size) {
+    g15canvas scratch G15_CANVAS_AUTO = {0};
+    g15r_initCanvas(&scratch);
+    g15r_clearScreen(&scratch, G15_COLOR_WHITE);
+    g15r_renderString(&scratch, (unsigned char*)s, 0, font_size, 0, 0);
+    int max_y = -1;
+    for (int y = 0; y < G15_LCD_HEIGHT; y++)
+        for (int x = 0; x < G15_LCD_WIDTH; x++)
+            if (g15r_getPixel(&scratch, x, y) && y > max_y) max_y = y;
+    return max_y + 1;
+}
 
+#define GAME_TITLE_AREA_HEIGHT G15_LCD_HEIGHT
+#define GAME_LOGO_MAX_WIDTH G15_LCD_WIDTH
+#define GAME_TITLE_MAX_LINES 4
+
+/* Breaks the title at spaces into lines no wider than max_width. Returns the
+   line count, or 0 if a single word is too wide or there are too many lines. */
+static int wrap_game_title(const char *title, int font_size, int max_width,
+                           char lines[GAME_TITLE_MAX_LINES][64]) {
+    char words[128];
+    snprintf(words, sizeof(words), "%s", title);
+    int count = 0;
+    lines[0][0] = 0;
+    char *save = NULL;
+    for (char *word = strtok_r(words, " ", &save); word; word = strtok_r(NULL, " ", &save)) {
+        if (measure_builtin_text_width(word, font_size) > max_width) return 0;
+        char candidate[128];
+        if (lines[count][0]) snprintf(candidate, sizeof(candidate), "%s %s", lines[count], word);
+        else snprintf(candidate, sizeof(candidate), "%s", word);
+        if (lines[count][0] && measure_builtin_text_width(candidate, font_size) > max_width) {
+            if (++count >= GAME_TITLE_MAX_LINES) return 0;
+            snprintf(lines[count], sizeof(lines[count]), "%s", word);
+        } else {
+            snprintf(lines[count], sizeof(lines[count]), "%s", candidate);
+        }
+    }
+    return lines[0][0] ? count + 1 : 0;
+}
+
+/* Picks the largest font in which the whole title fits into the free area
+   above the CPU/GPU values; a title that still does not fit is shortened. */
+static void layout_game_title(const char *title) {
+    static const int fonts[] = {G15_TEXT_LARGE, G15_TEXT_MED, G15_TEXT_SMALL};
+    const int max_width = G15_LCD_WIDTH - 2 * TEXT_EDGE_MARGIN;
+    g_game_title_line_count = 0;
+    for (size_t i = 0; i < sizeof(fonts) / sizeof(fonts[0]); i++) {
+        int line_height = measure_builtin_text_height("Ag", fonts[i]) + 1;
+        int count = wrap_game_title(title, fonts[i], max_width, g_game_title_lines);
+        if (count > 0 && count * line_height - 1 <= GAME_TITLE_AREA_HEIGHT) {
+            g_game_title_font = fonts[i];
+            g_game_title_line_height = line_height;
+            g_game_title_line_count = count;
+            break;
+        }
+    }
+    if (g_game_title_line_count == 0) {
+        g_game_title_font = G15_TEXT_SMALL;
+        g_game_title_line_height = measure_builtin_text_height("Ag", G15_TEXT_SMALL) + 1;
+        snprintf(g_game_title_lines[0], sizeof(g_game_title_lines[0]), "%s", title);
+        truncate_builtin_text(g_game_title_lines[0], G15_TEXT_SMALL, max_width);
+        g_game_title_line_count = g_game_title_lines[0][0] ? 1 : 0;
+    }
+    g_game_title_width = 0;
+    for (int i = 0; i < g_game_title_line_count; i++) {
+        int width = measure_builtin_text_width(g_game_title_lines[i], g_game_title_font);
+        if (width > g_game_title_width) g_game_title_width = width;
+    }
+}
+
+/* With a title, the converter renders that text as a bold logo. Otherwise it
+   converts the artwork image file "source". */
+static int convert_game_artwork(const char *source, const char *title,
+                                const char *output, int *width, int *height) {
     int pipefd[2];
     if (pipe(pipefd) != 0) {
         perror("g510-lcd-stats: cannot create game-logo conversion pipe");
-        return;
+        return 0;
     }
     pid_t child = fork();
     if (child < 0) {
         perror("g510-lcd-stats: cannot start game-logo conversion");
         close(pipefd[0]);
         close(pipefd[1]);
-        return;
+        return 0;
     }
     if (child == 0) {
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
         close(pipefd[1]);
-        char max_width[] = "72", max_height[] = "41";
-        execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
-               source, output, max_width, max_height, (char *)NULL);
+        char max_width[] = "160", max_height[] = "43";
+        if (title)
+            execlp("python3", "python3", PROJECT_DIR "/src/title-to-lcd.py",
+                   title, output, (char *)NULL);
+        else if (strstr(source, "/assets/logos/"))
+            execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
+                   source, output, max_width, max_height, "--upscale",
+                   (char *)NULL);
+        else
+            execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
+                   source, output, max_width, max_height, "--trim-transparent",
+                   "--upscale", "--invert-dark", "--boost-wide", "--best-logo",
+                   (char *)NULL);
         perror("g510-lcd-stats: cannot run game-logo converter");
         _exit(127);
     }
@@ -2547,10 +2722,10 @@ static void update_game_logo(void) {
     close(pipefd[1]);
     FILE *dimensions_pipe = fdopen(pipefd[0], "r");
     char dimensions[64] = "";
-    int width = 0, height = 0;
+    int converted_width = 0, converted_height = 0;
     if (dimensions_pipe) {
         if (fgets(dimensions, sizeof(dimensions), dimensions_pipe))
-            sscanf(dimensions, "%d %d", &width, &height);
+            sscanf(dimensions, "%d %d", &converted_width, &converted_height);
         fclose(dimensions_pipe);
     } else {
         close(pipefd[0]);
@@ -2559,58 +2734,380 @@ static void update_game_logo(void) {
     int child_status = 0;
     if (waitpid(child, &child_status, 0) < 0) {
         perror("g510-lcd-stats: waiting for game-logo conversion");
-        return;
+        return 0;
     }
     if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0
-            || width <= 0 || width > 72 || height <= 0 || height > 41) {
-        fprintf(stderr, "g510-lcd-stats: Steam artwork conversion failed for game %d\n",
-                g_media_game_appid);
+            || converted_width <= 0 || converted_width > GAME_LOGO_MAX_WIDTH
+            || converted_height <= 0 || converted_height > GAME_TITLE_AREA_HEIGHT) {
+        return 0;
+    }
+    *width = converted_width;
+    *height = converted_height;
+    return 1;
+}
+
+static int find_game_artwork(const char *cache_dir, int appid,
+                             const char *const *art_names, size_t art_count,
+                             char *source, size_t source_size) {
+    char app_cache_dir[640];
+    snprintf(app_cache_dir, sizeof(app_cache_dir), "%s/%d", cache_dir, appid);
+
+    for (size_t i = 0; i < art_count; i++) {
+        const char *flat_formats[] = {"%s/%d/%s", "%s/%d_%s"};
+        for (size_t j = 0; j < sizeof(flat_formats) / sizeof(flat_formats[0]); j++) {
+            int length = snprintf(source, source_size, flat_formats[j],
+                                  cache_dir, appid, art_names[i]);
+            if (length >= 0 && (size_t)length < source_size
+                    && access(source, R_OK) == 0)
+                return 1;
+        }
+
+        DIR *app_cache = opendir(app_cache_dir);
+        if (!app_cache) continue;
+        struct dirent *entry;
+        while ((entry = readdir(app_cache)) != NULL) {
+            if (entry->d_name[0] == '.') continue;
+            int length = snprintf(source, source_size, "%s/%s/%s",
+                                  app_cache_dir, entry->d_name, art_names[i]);
+            if (length >= 0 && (size_t)length < source_size
+                    && access(source, R_OK) == 0) {
+                closedir(app_cache);
+                return 1;
+            }
+        }
+        closedir(app_cache);
+    }
+    return 0;
+}
+
+static void update_game_logo(void) {
+    static time_t last_failed_attempt = 0;
+    g_game_logo_active = 0;
+    if (!g_media_is_game || g_media_game_appid <= 0) return;
+    if (g_game_logo_appid == g_media_game_appid && g_game_logo.width > 0) {
+        g_game_logo_active = 1;
         return;
     }
+    /* Steam may still be downloading the artwork, so retry occasionally. */
+    if (g_game_logo_appid == g_media_game_appid
+            && difftime(time(NULL), last_failed_attempt) < 30.0)
+        return;
 
+    g_game_logo_appid = g_media_game_appid;
+    g_game_logo.width = 0;
+    g_game_logo.height = 0;
+
+    /* The artwork cache lives in the Steam client directory, not necessarily
+       in the library that holds the game, so search all usual locations. */
+    const char *home = getenv("HOME");
+    char cache_dirs[5][640];
+    int cache_dir_count = 0;
+    if (g_media_game_library[0])
+        snprintf(cache_dirs[cache_dir_count++], sizeof(cache_dirs[0]),
+                 "%s/appcache/librarycache", g_media_game_library);
+    if (home && home[0]) {
+        static const char *const home_roots[] = {
+            "%s/.local/share/Steam", "%s/.steam/steam", "%s/.steam/root",
+            "%s/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+        };
+        for (size_t i = 0; i < sizeof(home_roots) / sizeof(home_roots[0]); i++) {
+            char root[512];
+            snprintf(root, sizeof(root), home_roots[i], home);
+            snprintf(cache_dirs[cache_dir_count++], sizeof(cache_dirs[0]),
+                     "%s/appcache/librarycache", root);
+        }
+    }
+    char source[768];
+    const char *art_names[] = {
+        "logo.png", "header.jpg", "library_header.jpg", "library_capsule.jpg",
+        "library_hero.jpg", "library_600x900.jpg"
+    };
+    char logo_dir[256], output[320], relative_path[64];
+    snprintf(logo_dir, sizeof(logo_dir), "%s/game_logos", data_dir());
+    mkdir_p(logo_dir);
+    snprintf(output, sizeof(output), "%s/%d.bin", logo_dir, g_media_game_appid);
+    snprintf(relative_path, sizeof(relative_path), "game_logos/%d.bin",
+             g_media_game_appid);
+
+    int width = 0, height = 0, converted = 0;
+    /* Hand-made line logos (assets/logos/<appid>.png) take precedence. */
+    char custom[400];
+    snprintf(custom, sizeof(custom), PROJECT_DIR "/assets/logos/%d.png",
+             g_media_game_appid);
+    char size_path[340];
+    snprintf(size_path, sizeof(size_path), "%s/%d.size", logo_dir, g_media_game_appid);
+    if (access(custom, R_OK) == 0)
+        converted = convert_game_artwork(custom, NULL, output, &width, &height);
+    /* Logos from pregenerate-game-logos.py (or an earlier run) are reused. */
+    FILE *size_file = converted ? NULL : fopen(size_path, "r");
+    if (size_file) {
+        if (fscanf(size_file, "%d %d", &width, &height) == 2
+                && width > 0 && width <= GAME_LOGO_MAX_WIDTH && height > 0
+                && height <= GAME_TITLE_AREA_HEIGHT
+                && access(output, R_OK) == 0)
+            converted = 1;
+        fclose(size_file);
+    }
+    /* The game's real Steam logo (converted for the 160x43 display); its
+       name as a text logo is only used when no artwork exists. */
+    for (int i = 0; i < cache_dir_count && !converted; i++) {
+        if (find_game_artwork(cache_dirs[i], g_media_game_appid, art_names,
+                              sizeof(art_names) / sizeof(art_names[0]),
+                              source, sizeof(source)))
+            converted = convert_game_artwork(source, NULL, output, &width, &height);
+    }
+    if (!converted) {
+        char name[128] = "";
+        if (!find_steam_game_name(g_media_game_appid, name, sizeof(name)))
+            snprintf(name, sizeof(name), "%s", g_media_title);
+        if (name[0])
+            converted = convert_game_artwork(NULL, name, output, &width, &height);
+    }
+    if (converted) {
+        size_file = fopen(size_path, "w");
+        if (size_file) {
+            fprintf(size_file, "%d %d\n", width, height);
+            fclose(size_file);
+        }
+    }
+    if (!converted) {
+        if (last_failed_attempt == 0)
+            fprintf(stderr, "g510-lcd-stats: no logo for game %d\n",
+                    g_media_game_appid);
+        last_failed_attempt = time(NULL);
+        return;
+    }
+    last_failed_attempt = 0;
     snprintf(g_game_logo.path, sizeof(g_game_logo.path), "%s", relative_path);
     g_game_logo.width = width;
     g_game_logo.height = height;
-    g_game_logo.x = 2;
-    g_game_logo.y = (G15_LCD_HEIGHT - height) / 2;
+    g_game_logo.x = (G15_LCD_WIDTH - width) / 2;
+    g_game_logo.y = (GAME_TITLE_AREA_HEIGHT - height) / 2;
     g_game_logo_active = 1;
 }
 
-static void draw_game_dashboard(g15canvas *c) {
-    if (g_game_logo_active) draw_image_element(c, &g_game_logo);
+static void update_game_title_text(void) {
+    static time_t last_lookup = 0;
+    static int cached_appid = 0;
+    static char cached_name[128] = "";
+    g_game_title_active = 0;
+    if (!g_media_is_game) return;
 
-    char value[32];
-    int label_x = g_game_logo_active
-        ? g_game_logo.x + g_game_logo.width + 4 : 12;
-    int value_x = g_game_logo_active ? label_x + 32 : 12;
-    int cpu_temp = get_cpu_temp_c();
-    int cpu_label_y = g_game_logo_active ? 4 : 3;
-    int cpu_value_y = g_game_logo_active ? 0 : 11;
-    g15r_G15FPrint(c, (char *)"CPU", label_x, cpu_label_y, G15_TEXT_MED,
-                   G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
-    if (cpu_temp >= 0) {
-        snprintf(value, sizeof(value), "%dC", cpu_temp);
-        draw_sensor_value(c, value, value_x, cpu_value_y, G15_TEXT_LARGE, 1);
-    } else {
-        g15r_G15FPrint(c, (char *)"N/A", value_x, cpu_value_y, G15_TEXT_LARGE,
-                       G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
+    if (g_media_game_appid != cached_appid) {
+        cached_appid = g_media_game_appid;
+        cached_name[0] = 0;
+        last_lookup = 0;
+    }
+    /* A manifest may appear a moment after the game starts, so retry. */
+    if (!cached_name[0] && cached_appid > 0
+            && difftime(time(NULL), last_lookup) >= 30.0) {
+        last_lookup = time(NULL);
+        if (!find_steam_game_name(cached_appid, cached_name, sizeof(cached_name)))
+            fprintf(stderr, "g510-lcd-stats: no Steam manifest name for game %d\n",
+                    cached_appid);
     }
 
+    const char *title = cached_name[0] ? cached_name : g_media_title;
+    if (!title[0]) return;
+    if (g_game_title_appid != cached_appid || strcmp(g_game_title_source, title) != 0) {
+        g_game_title_appid = cached_appid;
+        snprintf(g_game_title_source, sizeof(g_game_title_source), "%s", title);
+        layout_game_title(title);
+    }
+    g_game_title_active = g_game_title_line_count > 0;
+}
+
+static void update_game_title(void) {
+    update_game_logo();
+    g_game_title_active = 0;
+    if (g_game_logo_active) return;
+    update_game_title_text();
+}
+
+static int clamp_int(int value, int minimum, int maximum) {
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+static void draw_game_dashboard(g15canvas *c) {
+    static const char *const component_names[] = {"logo", "cpu", "gpu"};
+    int offset_x[3] = {0}, offset_y[3] = {0};
+    FILE *positions = fopen(game_dashboard_positions_path(), "r");
+    if (positions) {
+        char token[80];
+        while (fscanf(positions, "%79s", token) == 1) {
+            char key[32];
+            int value;
+            if (sscanf(token, "%31[^=]=%d", key, &value) != 2) continue;
+            for (int i = 0; i < 3; i++) {
+                char x_key[32], y_key[32];
+                snprintf(x_key, sizeof(x_key), "%s_x", component_names[i]);
+                snprintf(y_key, sizeof(y_key), "%s_y", component_names[i]);
+                if (strcmp(key, x_key) == 0) offset_x[i] = value;
+                else if (strcmp(key, y_key) == 0) offset_y[i] = value;
+            }
+        }
+        fclose(positions);
+    }
+    g_game_element_bounds_count = g_preview_editor_mode ? 3 : 0;
+    memset(g_game_element_bounds, 0, sizeof(g_game_element_bounds));
+
+    if (g_game_logo_active) {
+        int base_x = (G15_LCD_WIDTH - g_game_logo.width) / 2;
+        int base_y = (GAME_TITLE_AREA_HEIGHT - g_game_logo.height) / 2;
+        g_game_logo.x = clamp_int(base_x + offset_x[0], 0,
+                                  G15_LCD_WIDTH - g_game_logo.width);
+        g_game_logo.y = clamp_int(base_y + offset_y[0], 0,
+                                  GAME_TITLE_AREA_HEIGHT - g_game_logo.height);
+        draw_image_element(c, &g_game_logo);
+        if (g_preview_editor_mode) {
+            game_element_bounds_t *entry = &g_game_element_bounds[0];
+            memset(entry, 0, sizeof(*entry));
+            entry->bounds.label_x1 = g_game_logo.x;
+            entry->bounds.label_y1 = g_game_logo.y;
+            entry->bounds.label_x2 = g_game_logo.x + g_game_logo.width;
+            entry->bounds.label_y2 = g_game_logo.y + g_game_logo.height;
+            entry->bounds.value_x2 = entry->bounds.label_x2;
+            entry->anchor_x = g_game_logo.x;
+            entry->anchor_y = g_game_logo.y;
+            entry->base_x = base_x;
+            entry->base_y = base_y;
+            entry->present = 1;
+        }
+    }
+
+    if (g_game_title_active) {
+        int block_height = g_game_title_line_count * g_game_title_line_height - 1;
+        int base_x = (G15_LCD_WIDTH - g_game_title_width) / 2;
+        int base_y = (GAME_TITLE_AREA_HEIGHT - block_height) / 2;
+        int title_x = clamp_int(base_x + offset_x[0], 0,
+                                G15_LCD_WIDTH - g_game_title_width);
+        int title_y = clamp_int(base_y + offset_y[0], 0,
+                                GAME_TITLE_AREA_HEIGHT - block_height);
+        for (int i = 0; i < g_game_title_line_count; i++) {
+            int line_width = measure_builtin_text_width(g_game_title_lines[i],
+                                                        g_game_title_font);
+            g15r_renderString(c, (unsigned char *)g_game_title_lines[i], 0,
+                              g_game_title_font,
+                              title_x + (g_game_title_width - line_width) / 2,
+                              title_y + i * g_game_title_line_height);
+        }
+        if (g_preview_editor_mode) {
+            game_element_bounds_t *entry = &g_game_element_bounds[0];
+            memset(entry, 0, sizeof(*entry));
+            entry->bounds.label_x1 = title_x;
+            entry->bounds.label_y1 = title_y;
+            entry->bounds.label_x2 = title_x + g_game_title_width;
+            entry->bounds.label_y2 = title_y + block_height;
+            entry->bounds.value_x2 = entry->bounds.label_x2;
+            entry->anchor_x = title_x;
+            entry->anchor_y = title_y;
+            entry->base_x = base_x;
+            entry->base_y = base_y;
+            entry->present = 1;
+        }
+    }
+
+    int top_active = g_game_logo_active || g_game_title_active;
+    /* The logo or title uses the whole display; CPU/GPU only show as a
+       fallback when neither is available. */
+    if (top_active) return;
+    int cpu_base_x = top_active ? 0 : 12;
+    int cpu_base_y = top_active ? 31 : 3;
+    int gpu_base_x = top_active ? 84 : 88;
+    int gpu_base_y = top_active ? 38 : 3;
+    int cpu_label_y = clamp_int(cpu_base_y + offset_y[1],
+                                top_active ? 20 : 0,
+                                top_active ? 35 : 32);
+    int gpu_label_y = clamp_int(gpu_base_y + offset_y[2],
+                                top_active ? 20 : 0,
+                                top_active ? 35 : 32);
+    int cpu_label_x = cpu_base_x + offset_x[1];
+    int gpu_x = gpu_base_x + offset_x[2];
+    int cpu_value_x = cpu_label_x;
+    int cpu_value_y = top_active ? cpu_label_y - 12 : cpu_label_y + 8;
+    int gpu_value_x = gpu_x;
+    int gpu_value_y = top_active ? gpu_label_y - 12 : gpu_label_y + 8;
+    int cpu_temp = get_cpu_temp_c();
     int gpu_temp = get_gpu_temp_c(0);
-    int gpu_label_y = g_game_logo_active ? 25 : 3;
-    int gpu_value_y = g_game_logo_active ? 21 : 11;
-    int gpu_x = g_game_logo_active ? label_x : 88;
-    int gpu_value_x = g_game_logo_active ? value_x : 88;
-    g15r_G15FPrint(c, (char *)"GPU", gpu_x, gpu_label_y, G15_TEXT_MED,
-                   G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
-    if (gpu_temp >= 0) {
-        snprintf(value, sizeof(value), "%dC", gpu_temp);
-        draw_sensor_value(c, value, gpu_value_x, gpu_value_y,
-                          G15_TEXT_LARGE, 1);
-    } else {
-        g15r_G15FPrint(c, (char *)"N/A", gpu_value_x, gpu_value_y,
-                       G15_TEXT_LARGE,
+    char cpu_value[32], gpu_value[32];
+    if (cpu_temp >= 0) snprintf(cpu_value, sizeof(cpu_value), "%dC", cpu_temp);
+    else snprintf(cpu_value, sizeof(cpu_value), "N/A");
+    if (gpu_temp >= 0) snprintf(gpu_value, sizeof(gpu_value), "%dC", gpu_temp);
+    else snprintf(gpu_value, sizeof(gpu_value), "N/A");
+
+    const char *metric_labels[] = {"CPU", "GPU"};
+    const char *metric_values[] = {cpu_value, gpu_value};
+    int value_font_size = top_active ? G15_TEXT_MED : G15_TEXT_LARGE;
+    int label_widths[] = {
+        measure_builtin_label_width(metric_labels[0], G15_TEXT_MED),
+        measure_builtin_label_width(metric_labels[1], G15_TEXT_MED)
+    };
+    int reserved_value_widths[2];
+    for (int i = 0; i < 2; i++) {
+        int measured = (i == 0 ? cpu_temp : gpu_temp) >= 0
+            ? measure_temperature_value_width(metric_values[i], value_font_size)
+            : measure_builtin_text_width(metric_values[i], value_font_size);
+        int max_temperature = measure_temperature_value_width("100C", value_font_size);
+        int no_data = measure_builtin_text_width("N/A", value_font_size);
+        if (max_temperature > measured) measured = max_temperature;
+        if (no_data > measured) measured = no_data;
+        reserved_value_widths[i] = measured;
+    }
+    int *label_x[] = {&cpu_label_x, &gpu_x};
+    int *value_x[] = {&cpu_value_x, &gpu_value_x};
+    int base_x[] = {cpu_base_x, gpu_base_x};
+    int base_y[] = {cpu_base_y, gpu_base_y};
+    int metric_y[] = {cpu_label_y, gpu_label_y};
+    int value_y[] = {
+        top_active ? cpu_label_y : cpu_value_y,
+        top_active ? gpu_label_y : gpu_value_y
+    };
+    for (int i = 0; i < 2; i++) {
+        int max_x = G15_LCD_WIDTH - label_widths[i] - 4 - reserved_value_widths[i];
+        *label_x[i] = clamp_int(*label_x[i], 0, max_x);
+        *value_x[i] = top_active
+            ? *label_x[i] + label_widths[i] + 4 : *label_x[i];
+    }
+    int metric_x[] = {cpu_label_x, gpu_x};
+    int value_positions_x[] = {cpu_value_x, gpu_value_x};
+    for (int i = 0; i < 2; i++) {
+        char label[8];
+        snprintf(label, sizeof(label), "%s", metric_labels[i]);
+        g15r_G15FPrint(c, label, metric_x[i], metric_y[i], G15_TEXT_MED,
                        G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
+        if ((i == 0 ? cpu_temp : gpu_temp) >= 0)
+            draw_sensor_value(c, metric_values[i], value_positions_x[i], value_y[i],
+                              value_font_size, 1);
+        else
+            g15r_renderString(c, (unsigned char *)"N/A", 0, value_font_size,
+                              value_positions_x[i], value_y[i]);
+
+        if (g_preview_editor_mode) {
+            game_element_bounds_t *entry = &g_game_element_bounds[i + 1];
+            memset(entry, 0, sizeof(*entry));
+            int label_height = measure_builtin_label_height(metric_labels[i], G15_TEXT_MED);
+            int value_width = reserved_value_widths[i];
+            int x1 = metric_x[i] < value_positions_x[i] ? metric_x[i] : value_positions_x[i];
+            int y1 = metric_y[i] < value_y[i] ? metric_y[i] : value_y[i];
+            int x2 = metric_x[i] + label_widths[i];
+            if (value_positions_x[i] + value_width > x2)
+                x2 = value_positions_x[i] + value_width;
+            int y2 = metric_y[i] + label_height;
+            int value_height = top_active ? 8 : 10;
+            if (value_y[i] + value_height > y2) y2 = value_y[i] + value_height;
+            entry->bounds.label_x1 = x1;
+            entry->bounds.label_y1 = y1;
+            entry->bounds.label_x2 = x2;
+            entry->bounds.label_y2 = y2;
+            entry->bounds.value_x2 = x2;
+            entry->anchor_x = metric_x[i];
+            entry->anchor_y = metric_y[i];
+            entry->base_x = base_x[i];
+            entry->base_y = base_y[i];
+            entry->present = 1;
+        }
     }
 }
 
@@ -2802,7 +3299,10 @@ int main(int argc, char **argv) {
     /* One-shot preview mode: render a single screen to an image file
        through the exact same drawing code as the live LCD, then exit.
        Used by the GUI's live editor -- never touches /dev/g510-lcd. */
-    if (argc >= 3 && strcmp(argv[1], "--preview") == 0) {
+    if (argc >= 3 &&
+        (strcmp(argv[1], "--preview") == 0 ||
+         strcmp(argv[1], "--preview-editor") == 0)) {
+        g_preview_editor_mode = strcmp(argv[1], "--preview-editor") == 0;
         int screen = atoi(argv[2]);
         const char *outpath = argc >= 4 ? argv[3] : "/tmp/g510_preview.ppm";
         g15canvas canvas G15_CANVAS_AUTO = {0};
@@ -2810,7 +3310,7 @@ int main(int argc, char **argv) {
         update_net_speed();
         update_nvidia_stats();
         update_media_info();
-        update_game_logo();
+        update_game_title();
         viz_set_preview_placeholder();
         if (screen == 1) draw_clock_screen(&canvas);
         else if (screen >= 2 && screen <= 5) {
@@ -2845,7 +3345,7 @@ int main(int argc, char **argv) {
             update_net_speed();
             update_nvidia_stats();
             update_media_info();
-            update_game_logo();
+            update_game_title();
             update_media_screen_selection();
             last_slow_update = now_t;
         }

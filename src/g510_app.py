@@ -1069,6 +1069,8 @@ MAX_BAR_FONT_SIZE = 1
 FONT_SIZE_SCALE = {0: (1.0, 1.0), 1: (9 / 7, 6 / 5), 2: (15 / 7, 7 / 5), 3: (13 / 7, 10 / 5)}
 
 CUSTOM_SCREEN_IMAGES_DIR = DATA_DIR / "custom_screen_images"
+GAME_DASHBOARD_FILE = DATA_DIR / "game_dashboard_positions.txt"
+GAME_DASHBOARD_COMPONENTS = ("logo", "cpu", "gpu")
 
 
 def _encode_custom_screen_value(value):
@@ -1079,6 +1081,32 @@ def _encode_custom_screen_value(value):
 
 def _decode_custom_screen_value(value):
     return urllib.parse.unquote(value)
+
+
+def load_game_dashboard_offsets():
+    offsets = {component: {"x": 0, "y": 0} for component in GAME_DASHBOARD_COMPONENTS}
+    if not GAME_DASHBOARD_FILE.exists():
+        return offsets
+    for token in GAME_DASHBOARD_FILE.read_text().split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        component, separator, axis = key.partition("_")
+        if separator and component in offsets and axis in ("x", "y"):
+            try:
+                offsets[component][axis] = int(value)
+            except ValueError:
+                continue
+    return offsets
+
+
+def save_game_dashboard_offsets(offsets):
+    lines = [
+        f"{component}_{axis}={offsets[component][axis]}"
+        for component in GAME_DASHBOARD_COMPONENTS
+        for axis in ("x", "y")
+    ]
+    GAME_DASHBOARD_FILE.write_text(" ".join(lines) + "\n")
 
 
 def load_custom_screens():
@@ -1258,13 +1286,14 @@ def _parse_bounds_meta(meta_path):
     return bounds
 
 
-def render_preview(screen_num, tag="app"):
+def render_preview(screen_num, tag="app", editor=False):
     """Runs the same C binary that draws the real LCD, in one-shot
     --preview mode, and returns (QPixmap, bounds, err) -- the pixmap is
-    guaranteed pixel-identical to what the real screen shows, since
-    it's the same drawing code. bounds is real per-element pixel
-    geometry (see _parse_bounds_meta), empty dict for non-custom
-    screens or if the sidecar wasn't written.
+    uses the same drawing code as the real screen. With editor=True,
+    the automatic L4 game dashboard also reports hitboxes for its
+    logo and temperature blocks, making those items draggable.
+    bounds is real per-element pixel geometry (see _parse_bounds_meta),
+    empty dict for non-custom screens or if the sidecar wasn't written.
 
     `tag` picks the output file so independent callers (the Custom
     Screens editor's own live preview, the canvas's LCD-mirror
@@ -1278,7 +1307,12 @@ def render_preview(screen_num, tag="app"):
     meta_path = Path(str(out_path) + ".meta")
     try:
         result = subprocess.run(
-            [str(STATS_BINARY), "--preview", str(screen_num), str(out_path)],
+            [
+                str(STATS_BINARY),
+                "--preview-editor" if editor else "--preview",
+                str(screen_num),
+                str(out_path),
+            ],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -1391,6 +1425,16 @@ class ScreenPreviewCanvas(QWidget):
 
     def _element_rect(self, index):
         el = self._elements[index]
+        if el.get("kind") == "game_dashboard":
+            b = self._bounds.get(el["bounds_index"], {})
+            x1, y1 = b.get("label_x1", el["x"]), b.get("label_y1", el["y"])
+            x2 = b.get("label_x2", x1 + 20)
+            y2 = b.get("label_y2", y1 + ELEMENT_HIT_H)
+            return QRect(
+                x1 * PREVIEW_SCALE, y1 * PREVIEW_SCALE,
+                max(1, x2 - x1) * PREVIEW_SCALE,
+                max(1, y2 - y1) * PREVIEW_SCALE,
+            )
         if el.get("kind") in ("image", "visualizer"):
             # Both kinds know their own exact size directly (image: set
             # at import time by png-to-lcd.py; visualizer: just a plain
@@ -1748,6 +1792,8 @@ class CustomScreensTab(QWidget):
         super().__init__()
         self.current_screen = "L2"
         self.config = load_custom_screens()
+        self.game_dashboard_offsets = load_game_dashboard_offsets()
+        self._game_dashboard_elements = {}
         self._element_rows = []
 
         root = QHBoxLayout()
@@ -1808,13 +1854,13 @@ class CustomScreensTab(QWidget):
         canvas_col.addStretch(1)
         canvas_col.addWidget(self.preview_canvas, alignment=Qt.AlignHCenter)
 
-        drag_hint = QLabel(
+        self.drag_hint = QLabel(
             "Drag anything to move it. Hover a bar or a freshly-imported "
             "image to reveal its resize handle."
         )
-        drag_hint.setWordWrap(True)
-        drag_hint.setObjectName("Status")
-        canvas_col.addWidget(drag_hint)
+        self.drag_hint.setWordWrap(True)
+        self.drag_hint.setObjectName("Status")
+        canvas_col.addWidget(self.drag_hint)
         canvas_col.addStretch(1)
         root.addLayout(canvas_col, stretch=1)
 
@@ -2068,6 +2114,13 @@ class CustomScreensTab(QWidget):
 
     def select_screen(self, key):
         self.current_screen = key
+        self.drag_hint.setText(
+            "While a game is running, drag the logo/title or CPU/GPU block in the preview "
+            "to reposition the automatic L4 game dashboard."
+            if key == "L4" else
+            "Drag anything to move it. Hover a bar or a freshly-imported "
+            "image to reveal its resize handle."
+        )
         for k, btn in self.screen_buttons.items():
             btn.setChecked(k == key)
         editable = key != "L1"
@@ -2486,6 +2539,14 @@ class CustomScreensTab(QWidget):
         self.refresh_preview()
 
     def on_element_dragged(self, index, x, y):
+        elements = self.preview_canvas._elements
+        if 0 <= index < len(elements) and elements[index].get("kind") == "game_dashboard":
+            element = elements[index]
+            component = element["component"]
+            self.game_dashboard_offsets[component]["x"] = x - element["base_x"]
+            self.game_dashboard_offsets[component]["y"] = y - element["base_y"]
+            save_game_dashboard_offsets(self.game_dashboard_offsets)
+            return
         # Called continuously while dragging. Saving here (a cheap text
         # write, not the render itself) is what actually makes the live
         # preview live -- render_preview() runs the real C binary,
@@ -2763,6 +2824,9 @@ class CustomScreensTab(QWidget):
             self.on_preview_element_hovered(hovered_index)
 
     def on_preview_element_hovered(self, index):
+        elements = self.preview_canvas._elements
+        if index >= 0 and index < len(elements) and elements[index].get("kind") == "game_dashboard":
+            index = -1
         for row_index, row in enumerate(self._element_rows):
             hovered = row_index == index
             row.setStyleSheet(
@@ -2778,7 +2842,7 @@ class CustomScreensTab(QWidget):
         # ImageResizeWorker/_on_image_resize_finished) which calls this
         # itself once the .bin file + el["width"/"height"] are updated
         # together -- nothing to apply synchronously here anymore.
-        pixmap, bounds, err = render_preview(self.screen_number(), tag="editor")
+        pixmap, bounds, err = render_preview(self.screen_number(), tag="editor", editor=True)
         if pixmap is None:
             print(f"Custom Screens preview error: {err}")  # surfaced in the panel below instead of blocking the canvas
             return
@@ -2787,6 +2851,35 @@ class CustomScreensTab(QWidget):
             Qt.KeepAspectRatio, Qt.FastTransformation,
         )
         elements = self.config.get(self.current_screen, [])  # L1 isn't a key in self.config -- no draggable elements there
+        game_bounds = {
+            component: bounds.get(16 + index)
+            for index, component in enumerate(GAME_DASHBOARD_COMPONENTS)
+        }
+        if self.current_screen == "L4" and game_bounds["cpu"] and game_bounds["gpu"]:
+            elements = []
+            for component, bound_index in zip(GAME_DASHBOARD_COMPONENTS, (16, 17, 18)):
+                bound = bounds.get(bound_index)
+                if not bound:
+                    continue
+                element = self._game_dashboard_elements.setdefault(
+                    component,
+                    {"kind": "game_dashboard", "component": component, "bounds_index": bound_index},
+                )
+                element.update({
+                    "x": bound.get("anchor_x", bound["label_x1"]),
+                    "y": bound.get("anchor_y", bound["label_y1"]),
+                    "base_x": bound.get("base_x", bound.get("anchor_x", bound["label_x1"])),
+                    "base_y": bound.get("base_y", bound.get("anchor_y", bound["label_y1"])),
+                })
+                elements.append(element)
+            self.drag_hint.setText(
+                "Game dashboard active: drag the logo/title or CPU/GPU block to reposition it."
+            )
+        elif self.current_screen == "L4":
+            self.drag_hint.setText(
+                "Drag L4 layout elements here. While a game is running, the automatic "
+                "game dashboard is shown instead."
+            )
         self.preview_canvas.set_data(scaled, elements, bounds)
 
 
