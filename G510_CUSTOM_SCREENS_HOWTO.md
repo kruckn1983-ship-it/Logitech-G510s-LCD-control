@@ -10,7 +10,7 @@ Im Tab **LCD Screens** kannst du eigene Übersichten für die Tasten L2–L5 ers
 
 2. **Sensor hinzufügen** – Wähle im ersten Auswahlfeld einen Sensor (zum Beispiel CPU-Auslastung, RAM oder GPU-Temperatur). Wähle **Number** für eine reine Zahlenanzeige oder **Bar** für einen Balken mit Zahlenwert. Für Balken kannst du außerdem eine waagerechte oder senkrechte Ausrichtung einstellen. Klicke anschließend auf **Add**. Senkrechte Balken zeigen ein kurzes Label über dem Balken; die CPU-Kerne verwenden standardmäßig kompakte Labels wie C1 bis C8.
 
-3. **Text hinzufügen** – Klicke auf **Add Text...**, gib den gewünschten festen Text ein (zum Beispiel eine Beschriftung oder einen Namen) und füge ihn wie jedes andere Element zur Vorschau hinzu. Pro Bildschirm sind bis zu vier Textfelder möglich.
+3. **Text hinzufügen** – Klicke auf **Add Text...**, gib den gewünschten festen Text ein (zum Beispiel eine Beschriftung oder einen Namen) und füge ihn wie jedes andere Element zur Vorschau hinzu. Leerzeichen und Unterstriche bleiben beim Speichern erhalten. Pro Bildschirm sind bis zu vier Textfelder möglich.
 
 4. **Element verschieben** – Ziehe es mit der Maus an die gewünschte Stelle in der Vorschau. Dort wird es auch auf dem Tastaturdisplay erscheinen.
 

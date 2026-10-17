@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import datetime
+import urllib.parse
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -1070,6 +1071,16 @@ FONT_SIZE_SCALE = {0: (1.0, 1.0), 1: (9 / 7, 6 / 5), 2: (15 / 7, 7 / 5), 3: (13 
 CUSTOM_SCREEN_IMAGES_DIR = DATA_DIR / "custom_screen_images"
 
 
+def _encode_custom_screen_value(value):
+    """Encode freeform values so whitespace and underscores round-trip
+    through the LCD service's space-delimited config format."""
+    return urllib.parse.quote(value, safe="-.~").replace("_", "%5F")
+
+
+def _decode_custom_screen_value(value):
+    return urllib.parse.unquote(value)
+
+
 def load_custom_screens():
     """Returns {"L2": [ {kind:"sensor",sensor,style,x,y,width} or
     {kind:"image",path,x,y,width,height}, ... ], "L3": [...], ...}"""
@@ -1106,6 +1117,8 @@ def load_custom_screens():
                     el[k] = v
                 elif k == "label":
                     el[k] = v.replace("_", " ")
+                elif k == "label2":
+                    el["label"] = _decode_custom_screen_value(v)
                 elif k == "format" and v in {
                     choice for choices in DATETIME_FORMAT_CHOICES.values()
                     for choice, _ in choices
@@ -1158,6 +1171,8 @@ def load_custom_screens():
                         pass
                 elif k == "content":
                     tx[k] = v.replace("_", " ")
+                elif k == "content2":
+                    tx["content"] = _decode_custom_screen_value(v)
             if tx["content"]:
                 config[current].append(tx)
         elif line.startswith("VISUALIZER ") and current:
@@ -1188,14 +1203,8 @@ def save_custom_screens(config):
                     f"x={el['x']} y={el['y']}{src_part}"
                 )
             elif el.get("kind") == "text":
-                # Spaces -> underscores, matching exactly what
-                # load_custom_screens() and g510_lcd_stats.c both
-                # decode back. A literal underscore the user typed
-                # will round-trip as a space on reload -- a known,
-                # accepted limitation (documented in
-                # load_custom_screens()), not silent data corruption.
-                content = el["content"].replace(" ", "_") or "_"
-                lines.append(f"TEXT content={content} x={el['x']} y={el['y']} font={el.get('font_size', 0)}")
+                content = _encode_custom_screen_value(el["content"]) or "%20"
+                lines.append(f"TEXT content2={content} x={el['x']} y={el['y']} font={el.get('font_size', 0)}")
             elif el.get("kind") == "visualizer":
                 lines.append(f"VISUALIZER x={el['x']} y={el['y']} width={el['width']} height={el['height']}")
             else:
@@ -1206,7 +1215,7 @@ def save_custom_screens(config):
                     f"x={el['x']} y={el['y']} width={width} font={el.get('font_size', 0)}"
                 )
                 if el.get("label"):
-                    line += f" label={el['label'].replace(' ', '_')}"
+                    line += f" label2={_encode_custom_screen_value(el['label'])}"
                 if el.get("sensor") in DATETIME_FORMAT_CHOICES:
                     date_format = el.get("format") or DATETIME_FORMAT_DEFAULTS[el["sensor"]]
                     line += f" format={date_format}"

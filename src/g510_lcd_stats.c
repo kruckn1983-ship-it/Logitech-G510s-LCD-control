@@ -2029,6 +2029,27 @@ typedef struct {
 
 static custom_screen_t custom_screens[MAX_CUSTOM_SCREENS];
 
+static void decode_config_value(const char *src, char *dst, size_t dst_size) {
+    size_t out = 0;
+    while (*src && out + 1 < dst_size) {
+        if (src[0] == '%' && src[1] && src[2]) {
+            int hi = isxdigit((unsigned char)src[1]) ?
+                (isdigit((unsigned char)src[1]) ? src[1] - '0' :
+                 tolower((unsigned char)src[1]) - 'a' + 10) : -1;
+            int lo = isxdigit((unsigned char)src[2]) ?
+                (isdigit((unsigned char)src[2]) ? src[2] - '0' :
+                 tolower((unsigned char)src[2]) - 'a' + 10) : -1;
+            if (hi >= 0 && lo >= 0) {
+                dst[out++] = (char)((hi << 4) | lo);
+                src += 3;
+                continue;
+            }
+        }
+        dst[out++] = *src++;
+    }
+    dst[out] = 0;
+}
+
 /* Reloaded every time a custom screen is drawn (cheap, small file) so
    edits made live in the GUI show up on the next frame without needing
    the daemon restarted. */
@@ -2079,14 +2100,15 @@ static void load_custom_screens(void) {
             rest[sizeof(rest) - 1] = 0;
             char *tok = strtok(rest, " ");
             while (tok) {
-                char key[32], val[64];
-                if (sscanf(tok, "%31[^=]=%63s", key, val) == 2) {
+                char key[32], val[192];
+                if (sscanf(tok, "%31[^=]=%191s", key, val) == 2) {
                     if (strcmp(key, "sensor") == 0) { strncpy(el->sensor, val, sizeof(el->sensor) - 1); el->sensor[sizeof(el->sensor) - 1] = 0; }
                     else if (strcmp(key, "label") == 0) {
                         strncpy(el->label, val, sizeof(el->label) - 1);
                         el->label[sizeof(el->label) - 1] = 0;
                         for (char *p = el->label; *p; p++) if (*p == '_') *p = ' ';
                     }
+                    else if (strcmp(key, "label2") == 0) decode_config_value(val, el->label, sizeof(el->label));
                     else if (strcmp(key, "format") == 0) {
                         strncpy(el->format, val, sizeof(el->format) - 1);
                         el->format[sizeof(el->format) - 1] = 0;
@@ -2161,6 +2183,7 @@ static void load_custom_screens(void) {
                         tx->content[sizeof(tx->content) - 1] = 0;
                         for (char *p = tx->content; *p; p++) if (*p == '_') *p = ' ';
                     }
+                    else if (strcmp(key, "content2") == 0) decode_config_value(val, tx->content, sizeof(tx->content));
                     else if (strcmp(key, "x") == 0) tx->x = atoi(val);
                     else if (strcmp(key, "y") == 0) tx->y = atoi(val);
                     else if (strcmp(key, "font") == 0) {
