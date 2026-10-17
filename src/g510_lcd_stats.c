@@ -650,6 +650,7 @@ static char g_media_artist[48] = "";
 static char g_media_elapsed[32] = ""; /* wide enough for even an absurdly long podcast (e.g. 9999:59/9999:59) -- -Wformat-truncation caught the original 16-byte buffer as theoretically too small, real warning, not ignored */
 static double g_media_progress_pct = -1;
 static int g_media_playing = 0;
+static int g_media_is_game = 0;
 
 /* Real bug, direct report: "its also picking up a (56) which is just
    a bunch of notifications, needs to be ignored. it used to look nice
@@ -753,12 +754,80 @@ static int media_title_from_window_pid(int pid, char *out, size_t outlen) {
     return found;
 }
 
+static int media_process_is_steam_game(int pid) {
+    for (int depth = 0; pid > 1 && depth < 16; depth++) {
+        char path[64], command[8192], status[256];
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            size_t len = fread(command, 1, sizeof(command) - 1, f);
+            fclose(f);
+            for (size_t i = 0; i < len; i++) {
+                if (command[i] == 0) command[i] = ' ';
+            }
+            command[len] = 0;
+            if (strstr(command, "steamapps/common/")) return 1;
+        }
+
+        snprintf(path, sizeof(path), "/proc/%d/status", pid);
+        f = fopen(path, "r");
+        if (!f) break;
+        int parent_pid = 0;
+        while (fgets(status, sizeof(status), f)) {
+            if (sscanf(status, "PPid:\t%d", &parent_pid) == 1) break;
+        }
+        fclose(f);
+        if (parent_pid == pid) break;
+        pid = parent_pid;
+    }
+    return 0;
+}
+
+static void media_use_audio_stream(const char *name, const char *app_name,
+                                   int process_id, int corked,
+                                   int *selected_stream, char *title,
+                                   size_t title_size, char *artist,
+                                   size_t artist_size) {
+    if (corked || (!name[0] && !app_name[0] && process_id <= 0)) return;
+
+    g_media_playing = 1;
+    if (media_process_is_steam_game(process_id)) {
+        g_media_is_game = 1;
+        if (!media_title_from_window_pid(process_id, title, title_size)
+                && app_name[0])
+            snprintf(title, title_size, "%s", app_name);
+        return;
+    }
+
+    if (*selected_stream) return;
+    *selected_stream = 1;
+    if (title[0]) return;
+
+    if (!media_name_is_generic(name)) {
+        char stream_title[256];
+        snprintf(stream_title, sizeof(stream_title), "%s", name);
+        char *sep = strstr(stream_title, " - ");
+        if (sep) {
+            *sep = 0;
+            snprintf(artist, artist_size, "%s", stream_title);
+            snprintf(title, title_size, "%s", sep + 3);
+        } else {
+            snprintf(title, title_size, "%s", stream_title);
+        }
+    } else if (!title[0]) {
+        if (!media_title_from_window_pid(process_id, title, title_size)
+                && app_name[0] && !media_name_is_generic(app_name))
+            snprintf(title, title_size, "%s", app_name);
+    }
+}
+
 static void update_media_info(void) {
     g_media_title[0] = 0;
     g_media_artist[0] = 0;
     g_media_elapsed[0] = 0;
     g_media_progress_pct = -1;
     g_media_playing = 0;
+    g_media_is_game = 0;
     /* Real bug found and fixed (title/artist source): querying with no
        -p flag lets playerctl pick "the first available player" by its
        own priority order, which on this real KDE desktop picked
@@ -855,61 +924,52 @@ static void update_media_info(void) {
 
     /* Fallback fuer Player ohne MPRIS (z. B. radiotray-ng): Der Stream-Titel
        steht in PulseAudio als media.name ("Interpret - Titel"). */
-    if (!g_media_playing || !title_buf[0]) {
-        FILE *pa = popen("LC_ALL=C pactl list sink-inputs 2>/dev/null", "r");
-        if (pa) {
-            char pl[512], name[256] = "";
-            char app_name[128] = "";
-            int process_id = 0;
-            int corked = 0;
-            while (fgets(pl, sizeof(pl), pa)) {
-                if (strncmp(pl, "Sink Input", 10) == 0) {
-                    if ((name[0] || process_id > 0) && !corked) break;
-                    name[0] = 0;
-                    app_name[0] = 0;
-                    process_id = 0;
-                    corked = 0;
-                } else if (strstr(pl, "Corked: yes")) {
-                    corked = 1;
-                } else {
-                    char *m = strstr(pl, "media.name = \"");
-                    if (m) {
-                        m += strlen("media.name = \"");
-                        char *q = strrchr(m, '"');
-                        if (q) *q = 0;
-                        snprintf(name, sizeof(name), "%s", m);
-                    } else if ((m = strstr(pl, "application.name = \""))) {
-                        m += strlen("application.name = \"");
-                        char *q = strrchr(m, '"');
-                        if (q) *q = 0;
-                        snprintf(app_name, sizeof(app_name), "%s", m);
-                    } else if ((m = strstr(pl, "application.process.id = \""))) {
-                        process_id = atoi(m + strlen("application.process.id = \""));
-                    }
-                }
-            }
-            pclose(pa);
-            if (!corked && (name[0] || process_id > 0)) {
-                g_media_playing = 1;
-                if (!media_name_is_generic(name)) {
-                    char *sep = strstr(name, " - ");
-                    if (sep) {
-                        *sep = 0;
-                        snprintf(artist_buf, sizeof(artist_buf), "%.47s", name);
-                        snprintf(title_buf, sizeof(title_buf), "%.63s", sep + 3);
-                    } else {
-                        snprintf(title_buf, sizeof(title_buf), "%.63s", name);
-                    }
-                } else {
-                    if (!media_title_from_window_pid(process_id, title_buf,
-                                                     sizeof(title_buf))
-                            && app_name[0] && !media_name_is_generic(app_name))
-                        snprintf(title_buf, sizeof(title_buf), "%.63s", app_name);
+    FILE *pa = popen("LC_ALL=C pactl list sink-inputs 2>/dev/null", "r");
+    if (pa) {
+        char pl[512], name[256] = "";
+        char app_name[128] = "";
+        int process_id = 0, corked = 0, selected_stream = 0;
+        while (fgets(pl, sizeof(pl), pa)) {
+            if (strncmp(pl, "Sink Input", 10) == 0) {
+                media_use_audio_stream(name, app_name, process_id, corked,
+                                       &selected_stream, title_buf,
+                                       sizeof(title_buf), artist_buf,
+                                       sizeof(artist_buf));
+                name[0] = 0;
+                app_name[0] = 0;
+                process_id = 0;
+                corked = 0;
+            } else if (strstr(pl, "Corked: yes")) {
+                corked = 1;
+            } else {
+                char *m = strstr(pl, "media.name = \"");
+                if (m) {
+                    m += strlen("media.name = \"");
+                    char *q = strrchr(m, '"');
+                    if (q) *q = 0;
+                    snprintf(name, sizeof(name), "%s", m);
+                } else if ((m = strstr(pl, "application.name = \""))) {
+                    m += strlen("application.name = \"");
+                    char *q = strrchr(m, '"');
+                    if (q) *q = 0;
+                    snprintf(app_name, sizeof(app_name), "%s", m);
+                } else if ((m = strstr(pl, "application.process.id = \""))) {
+                    process_id = atoi(m + strlen("application.process.id = \""));
                 }
             }
         }
+        media_use_audio_stream(name, app_name, process_id, corked,
+                               &selected_stream, title_buf,
+                               sizeof(title_buf), artist_buf,
+                               sizeof(artist_buf));
+        pclose(pa);
     }
 
+    if (g_media_is_game) {
+        artist_buf[0] = 0;
+        g_media_elapsed[0] = 0;
+        g_media_progress_pct = -1;
+    }
     strncpy(g_media_title, title_buf, sizeof(g_media_title) - 1);
     strncpy(g_media_artist, artist_buf, sizeof(g_media_artist) - 1);
     if (time_playing >= 0 && pos_us >= 0 && len_us >= 0) {
@@ -1340,7 +1400,8 @@ static int read_screen(void) {
     return s;
 }
 
-#define MEDIA_SCREEN 3
+#define MUSIC_SCREEN 3
+#define GAME_SCREEN 4
 
 static int write_screen(int screen) {
     FILE *f = fopen(screen_state_path(), "w");
@@ -1359,6 +1420,7 @@ static void update_media_screen_selection(void) {
     static int media_screen_dismissed = 0;
     static int last_screen = -1;
     int screen = read_screen();
+    int target_screen = g_media_is_game ? GAME_SCREEN : MUSIC_SCREEN;
 
     if (!g_media_playing) {
         playback_active = 0;
@@ -1370,16 +1432,14 @@ static void update_media_screen_selection(void) {
     if (!playback_active) {
         playback_active = 1;
         media_screen_dismissed = 0;
-        if (screen != MEDIA_SCREEN && write_screen(MEDIA_SCREEN))
-            screen = MEDIA_SCREEN;
     } else {
         if (!media_screen_dismissed && screen != last_screen
-                && screen != MEDIA_SCREEN)
+                && screen != target_screen)
             media_screen_dismissed = 1;
-        if (!media_screen_dismissed && screen != MEDIA_SCREEN
-                && write_screen(MEDIA_SCREEN))
-            screen = MEDIA_SCREEN;
     }
+    if (!media_screen_dismissed && screen != target_screen
+            && write_screen(target_screen))
+        screen = target_screen;
     last_screen = screen;
 }
 
@@ -2415,6 +2475,12 @@ static void draw_custom_screen(g15canvas *c, int screen_num) {
        draws nothing -- matches what the real LCD should show for a
        screen with nothing on it. */
     if (cs->count == 0 && cs->image_count == 0 && cs->text_count == 0 && cs->visualizer_count == 0) {
+        if (screen_num == GAME_SCREEN && g_media_is_game && g_media_title[0]) {
+            char title[sizeof(g_media_title)];
+            snprintf(title, sizeof(title), "%s", g_media_title);
+            truncate_builtin_label(title, G15_TEXT_MED, G15_LCD_WIDTH - 4);
+            draw_builtin_label(c, title, 2, 2, G15_TEXT_MED);
+        }
         return;
     }
     for (int i = 0; i < cs->count; i++) draw_element(c, &cs->elements[i]);
