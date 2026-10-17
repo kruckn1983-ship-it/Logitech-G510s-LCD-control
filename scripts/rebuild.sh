@@ -28,7 +28,7 @@ echo "Building g510_lcd_stats..."
 # library and corrupts stack memory (bit us once already -- see README).
 # -DPROJECT_DIR bakes in this checkout's own path (font/config file
 # locations) without any file in the repo hardcoding a username.
-gcc $(pkg-config --cflags freetype2) -DPROJECT_DIR="\"$PROJECT_DIR\"" g510_lcd_stats.c -o g510_lcd_stats -lg15render $(pkg-config --libs freetype2) -lm
+gcc -I/usr/local/include -L/usr/local/lib -Wl,-rpath,/usr/local/lib $(pkg-config --cflags freetype2) -DPROJECT_DIR="\"$PROJECT_DIR\"" g510_lcd_stats.c -o g510_lcd_stats -lg15render $(pkg-config --libs freetype2) -lm
 
 echo "Building g510_lcd_buttons..."
 gcc g510_lcd_buttons.c -o g510_lcd_buttons
