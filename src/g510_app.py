@@ -23,10 +23,11 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QComboBox, QPushButton, QLabel,
     QMessageBox, QDialog, QLineEdit, QSpinBox, QFrame, QScrollArea,
-    QFileDialog, QInputDialog, QStatusBar,
+    QFileDialog, QInputDialog, QStatusBar, QListWidget, QListWidgetItem,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QPoint
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QFontMetrics
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QPainter, QPen, QFontMetrics
 import evdev
 from evdev import ecodes
 
@@ -251,15 +252,15 @@ def read_active_screen_num():
     return s if 0 <= s <= 5 else 0
 
 COLOR_RGB = {
-    "Blue-Violet": (110, 0, 255),
-    "Red": (255, 0, 0),
-    "Green": (0, 255, 0),
-    "Blue": (0, 0, 255),
-    "Purple": (128, 0, 128),
+    "Blauviolett": (110, 0, 255),
+    "Rot": (255, 0, 0),
+    "Grün": (0, 255, 0),
+    "Blau": (0, 0, 255),
+    "Lila": (128, 0, 128),
     "Cyan": (0, 255, 255),
     "Orange": (255, 100, 0),
     "Pink": (255, 0, 150),
-    "White": (255, 255, 255),
+    "Weiß": (255, 255, 255),
 }
 
 # Standardbelegung der Tasten L2-L5 (Vorlage pro Taste)
@@ -400,7 +401,7 @@ def apply_backlight(rgb):
         (LED_DIR / "multi_intensity").write_text(f"{rgb[0]} {rgb[1]} {rgb[2]}")
         (LED_DIR / "brightness").write_text(str(MAX_BRIGHTNESS))
     except PermissionError as e:
-        return False, f"Permission denied writing to {LED_DIR} -- check the udev rule (99-g510-lcd.rules) is installed: {e}"
+        return False, f"Zugriff verweigert beim Schreiben nach {LED_DIR} – prüfe, ob die udev-Regel (99-g510-lcd.rules) installiert ist: {e}"
 
     write_defaults_script(rgb, MAX_BRIGHTNESS)
     return True, None
@@ -535,44 +536,44 @@ class MacroRecordDialog(QDialog):
         macros = load_macros()
         existing = macros.get(profile, {}).get(gkey)
         if isinstance(existing, dict) and existing.get("type") == "command":
-            status_text = f"Currently runs: {existing.get('value', '')}"
+            status_text = f"Führt aktuell aus: {existing.get('value', '')}"
         elif existing:
-            status_text = "Currently assigned (recorded keystrokes)."
+            status_text = "Aktuell belegt (aufgezeichnete Tastenfolge)."
         else:
-            status_text = "Nothing assigned yet."
+            status_text = "Noch nichts zugewiesen."
         self.status_label = QLabel(status_text)
         layout.addWidget(self.status_label)
 
-        self.record_btn = QPushButton("Record")
-        self.record_btn.setToolTip("Start recording a keystroke sequence -- press it again to stop")
+        self.record_btn = QPushButton("Aufnehmen")
+        self.record_btn.setToolTip("Aufnahme einer Tastenfolge starten – erneut klicken zum Beenden")
         self.record_btn.clicked.connect(self.toggle_recording)
         layout.addWidget(self.record_btn)
 
         btn_row = QHBoxLayout()
-        self.save_btn = QPushButton("Save")
-        self.save_btn.setToolTip("Save the recorded keystroke sequence to this G-key")
+        self.save_btn = QPushButton("Speichern")
+        self.save_btn.setToolTip("Aufgezeichnete Tastenfolge auf dieser G-Taste speichern")
         self.save_btn.clicked.connect(self.on_save)
         self.save_btn.setEnabled(False)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setToolTip("Remove whatever is currently assigned to this G-key")
+        clear_btn = QPushButton("Löschen")
+        clear_btn.setToolTip("Aktuelle Belegung dieser G-Taste entfernen")
         clear_btn.clicked.connect(self.on_clear)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setToolTip("Close without changing this G-key's assignment")
+        cancel_btn = QPushButton("Abbrechen")
+        cancel_btn.setToolTip("Schließen, ohne die Belegung dieser G-Taste zu ändern")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(clear_btn)
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
 
-        layout.addWidget(QLabel("<b>Or run a command instead:</b>"))
+        layout.addWidget(QLabel("<b>Oder stattdessen einen Befehl ausführen:</b>"))
         cmd_row = QHBoxLayout()
         self.command_edit = QLineEdit()
-        self.command_edit.setPlaceholderText("e.g. notify-send hello")
-        self.command_edit.setToolTip("Any shell command to run when this G-key is pressed, instead of replaying keystrokes")
+        self.command_edit.setPlaceholderText("z. B. notify-send hello")
+        self.command_edit.setToolTip("Beliebiger Shell-Befehl, der beim Drücken dieser G-Taste ausgeführt wird, statt Tasten abzuspielen")
         if isinstance(existing, dict) and existing.get("type") == "command":
             self.command_edit.setText(existing.get("value", ""))
-        save_cmd_btn = QPushButton("Save Command")
-        save_cmd_btn.setToolTip("Save this shell command to this G-key")
+        save_cmd_btn = QPushButton("Befehl speichern")
+        save_cmd_btn.setToolTip("Diesen Shell-Befehl auf dieser G-Taste speichern")
         save_cmd_btn.clicked.connect(self.on_save_command)
         cmd_row.addWidget(self.command_edit)
         cmd_row.addWidget(save_cmd_btn)
@@ -582,14 +583,14 @@ class MacroRecordDialog(QDialog):
 
     def toggle_recording(self):
         if self.recorder is None:
-            self.status_label.setText("Recording... press your key combo, then click Stop.")
-            self.record_btn.setText("Stop")
+            self.status_label.setText("Aufnahme läuft … Tastenkombination drücken, dann auf Stopp klicken.")
+            self.record_btn.setText("Stopp")
             self.recorder = RecorderThread()
             self.recorder.finished_recording.connect(self.on_recorded)
             self.recorder.start()
         else:
             self.record_btn.setEnabled(False)  # ignore clicks until the thread actually finishes
-            self.status_label.setText("Stopping...")
+            self.status_label.setText("Wird beendet …")
             self.recorder.stop()
 
     def reject(self):
@@ -608,13 +609,13 @@ class MacroRecordDialog(QDialog):
             # and a hard process abort (confirmed -- this crashed twice).
             self.recorder.wait()
         self.recorder = None
-        self.record_btn.setText("Record")
+        self.record_btn.setText("Aufnehmen")
         self.record_btn.setEnabled(True)
         if not ok:
-            self.status_label.setText("Keyboard not found -- is it plugged in?")
+            self.status_label.setText("Tastatur nicht gefunden – ist sie angeschlossen?")
             self.save_btn.setEnabled(False)
             return
-        self.status_label.setText(f"Captured {len(sequence.split())} events. Click Save to keep it.")
+        self.status_label.setText(f"{len(sequence.split())} Ereignisse erfasst. Zum Behalten auf Speichern klicken.")
         self.save_btn.setEnabled(bool(sequence))
 
     def on_save(self):
@@ -660,7 +661,7 @@ class KeyboardTab(QWidget):
         self.refresh_assigned_keys()
         canvas_col.addWidget(self.canvas)
 
-        hint = QLabel("Click a G-key to record a macro  •  click M1/M2/M3 to switch profiles  •  gold border = macro assigned")
+        hint = QLabel("G-Taste anklicken, um ein Makro aufzunehmen  •  M1/M2/M3 anklicken, um das Profil zu wechseln  •  goldener Rahmen = Makro zugewiesen")
         hint.setObjectName("Status")
         canvas_col.addWidget(hint)
         canvas_col.addStretch()
@@ -671,7 +672,7 @@ class KeyboardTab(QWidget):
         panel.setFixedWidth(220)
         panel_layout = QVBoxLayout()
 
-        title = QLabel("Backlight")
+        title = QLabel("Beleuchtung")
         title.setObjectName("Title")
         panel_layout.addWidget(title)
 
@@ -684,21 +685,21 @@ class KeyboardTab(QWidget):
         # picker has no separate "default" concept to preserve).
         self._pending_rgb = current_rgb or next(iter(COLOR_RGB.values()))
 
-        panel_layout.addWidget(QLabel("Color"))
+        panel_layout.addWidget(QLabel("Farbe"))
         self.preview_swatch = QLabel()
         self.preview_swatch.setFixedHeight(26)
         self._set_preview_style(self._pending_rgb)
         panel_layout.addWidget(self.preview_swatch)
 
         panel_layout.addSpacing(6)
-        panel_layout.addWidget(QLabel("<b>Hex code</b>"))
+        panel_layout.addWidget(QLabel("<b>Hex-Code</b>"))
         hex_row = QHBoxLayout()
         self.hex_edit = QLineEdit()
         self.hex_edit.setPlaceholderText("8000ff")
-        self.hex_edit.setToolTip("6-digit hex color, no # needed")
+        self.hex_edit.setToolTip("6-stellige Hex-Farbe, ohne # eingeben")
         self.hex_edit.returnPressed.connect(self.on_apply_hex)
-        hex_apply_btn = QPushButton("Apply")
-        hex_apply_btn.setToolTip("Preview this hex color on the canvas (click the big Apply button below to send it to the keyboard)")
+        hex_apply_btn = QPushButton("Übernehmen")
+        hex_apply_btn.setToolTip("Diese Hex-Farbe auf der Zeichenfläche in der Vorschau zeigen (mit dem großen Anwenden-Button unten an die Tastatur senden)")
         hex_apply_btn.setObjectName("PanelPrimary")
         hex_apply_btn.clicked.connect(self.on_apply_hex)
         hex_row.addWidget(self.hex_edit)
@@ -706,7 +707,7 @@ class KeyboardTab(QWidget):
         panel_layout.addLayout(hex_row)
 
         panel_layout.addSpacing(8)
-        panel_layout.addWidget(QLabel("Presets"))
+        panel_layout.addWidget(QLabel("Voreinstellungen"))
         swatch_grid = QGridLayout()
         swatch_grid.setSpacing(4)
         for i, (name, rgb) in enumerate(COLOR_RGB.items()):
@@ -726,13 +727,13 @@ class KeyboardTab(QWidget):
         panel_layout.addLayout(swatch_row)
         panel_layout.addSpacing(4)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setToolTip("Send this color to the keyboard right now, and make it the boot default")
+        apply_btn = QPushButton("Anwenden")
+        apply_btn.setToolTip("Diese Farbe sofort an die Tastatur senden und als Start-Standard speichern")
         apply_btn.setObjectName("PanelPrimary")
         apply_btn.clicked.connect(self.on_apply)
         panel_layout.addWidget(apply_btn)
-        set_default_btn = QPushButton("Set as Default")
-        set_default_btn.setToolTip("Save this color as the boot default WITHOUT changing the keyboard's live color right now")
+        set_default_btn = QPushButton("Als Standard festlegen")
+        set_default_btn.setToolTip("Diese Farbe als Start-Standard speichern, OHNE die aktuelle Tastaturfarbe zu ändern")
         set_default_btn.setObjectName("PanelButton")
         set_default_btn.clicked.connect(self.on_set_as_default)
         panel_layout.addWidget(set_default_btn)
@@ -744,17 +745,17 @@ class KeyboardTab(QWidget):
         panel_layout.addWidget(sep)
         panel_layout.addSpacing(10)
 
-        service_label = QLabel("Service Control")
+        service_label = QLabel("Dienste")
         service_label.setObjectName("Status")
         panel_layout.addWidget(service_label)
         service_row = QHBoxLayout()
         service_row.setSpacing(4)
         service_tooltips = {
-            "start": "Start all 3 G510 services (LCD stats, buttons, macros) if they aren't running",
-            "stop": "Stop all 3 G510 services -- the LCD, buttons, and macros will stop responding",
-            "restart": "Restart all 3 G510 services -- use this after a config change that isn't picking up",
+            "start": "Alle 3 G510-Dienste (LCD-Statistik, Tasten, Makros) starten, falls sie nicht laufen",
+            "stop": "Alle 3 G510-Dienste beenden – LCD, Tasten und Makros reagieren dann nicht mehr",
+            "restart": "Alle 3 G510-Dienste neu starten – nützlich, wenn eine Konfigurationsänderung nicht übernommen wird",
         }
-        for label, action in (("Start", "start"), ("Stop", "stop"), ("Restart", "restart")):
+        for label, action in (("Starten", "start"), ("Stoppen", "stop"), ("Neustart", "restart")):
             btn = QPushButton(label)
             btn.setObjectName("Discreet")
             btn.setToolTip(service_tooltips[action])
@@ -860,7 +861,7 @@ class KeyboardTab(QWidget):
         precisely rather than pick from the fixed preset list."""
         text = self.hex_edit.text().strip().lstrip("#")
         if len(text) != 6 or any(c not in "0123456789abcdefABCDEF" for c in text):
-            QMessageBox.critical(self, "Invalid color", "Use 6 hex digits, e.g. 8000ff")
+            QMessageBox.critical(self, "Ungültige Farbe", "6 Hex-Ziffern verwenden, z. B. 8000ff")
             return
         rgb = tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
         self.set_pending_color(rgb)
@@ -868,19 +869,19 @@ class KeyboardTab(QWidget):
     def on_apply(self):
         ok, err = apply_backlight(self._pending_rgb)
         if not ok:
-            QMessageBox.critical(self, "Error", err)
+            QMessageBox.critical(self, "Fehler", err)
             return
         self.canvas.set_board_color(QColor(*self._pending_rgb))
 
     def on_set_as_default(self):
         ok, err = set_as_default(self._pending_rgb)
         if not ok:
-            QMessageBox.critical(self, "Error", err)
+            QMessageBox.critical(self, "Fehler", err)
 
     def on_service_action(self, action):
         ok, err = run_systemctl(action)
         if not ok:
-            QMessageBox.critical(self, "Error", err)
+            QMessageBox.critical(self, "Fehler", err)
 
 
 # --- Custom Screens (v1.1): dashboards for L2-L5, mirrors the sensor
@@ -890,35 +891,35 @@ class KeyboardTab(QWidget):
 # schema needed for something this small).
 SENSOR_CHOICES = [
     ("CPU_PCT", "CPU %"),
-    *[(f"CPU_CORE_{i}", f"CPU Core {i + 1} %") for i in range(8)],
+    *[(f"CPU_CORE_{i}", f"CPU-Kern {i + 1} %") for i in range(8)],
     ("CPU_GHZ", "CPU GHz"),
-    ("CPU_TEMP", "CPU Temp"),
+    ("CPU_TEMP", "CPU-Temperatur"),
     ("RAM_PCT", "RAM %"),
-    ("RAM_AMOUNT", "RAM Used (amount)"),
+    ("RAM_AMOUNT", "RAM belegt (Menge)"),
     ("VRAM_PCT", "VRAM %"),
-    ("VRAM_AMOUNT", "VRAM Used (amount)"),
-    ("MAXTEMP", "Max Temp Seen"),
+    ("VRAM_AMOUNT", "VRAM belegt (Menge)"),
+    ("MAXTEMP", "Höchste Temperatur"),
     ("GPU_PCT", "GPU %"),
-    ("GPU_EDGE_TEMP", "GPU Edge Temp"),
-    ("GPU_HOTSPOT_TEMP", "GPU Hotspot Temp"),
-    ("GPU_VRAM_TEMP", "GPU VRAM Temp"),
+    ("GPU_EDGE_TEMP", "GPU-Edge-Temperatur"),
+    ("GPU_HOTSPOT_TEMP", "GPU-Hotspot-Temperatur"),
+    ("GPU_VRAM_TEMP", "GPU-VRAM-Temperatur"),
     ("SWAP_PCT", "Swap %"),
-    ("DISK_ROOT_PCT", "Disk % (root)"),
-    ("DISK_SECONDARY_PCT", "Disk % (secondary)"),
-    ("UPTIME", "Uptime"),
-    ("NET_DOWN", "Network Download Speed"),
-    ("NET_UP", "Network Upload Speed"),
-    ("TIME", "Time"),
-    ("DATE", "Date"),
-    ("MEDIA_TITLE", "Media: Song Title"),
-    ("MEDIA_ARTIST", "Media: Artist"),
-    ("MEDIA_ELAPSED", "Media: Time Elapsed"),
-    ("MB_TEMP1", "Motherboard Temp 1 (unlabeled)"),
-    ("MB_TEMP2", "Motherboard Temp 2 (unlabeled)"),
-    ("MB_TEMP3", "Motherboard Temp 3 (unlabeled)"),
-    ("MB_TEMP4", "Motherboard Temp 4 (unlabeled)"),
-    ("MB_TEMP5", "Motherboard Temp 5 (unlabeled)"),
-    ("MB_TEMP6", "Motherboard Temp 6 (unlabeled)"),
+    ("DISK_ROOT_PCT", "Datenträger % (Root)"),
+    ("DISK_SECONDARY_PCT", "Datenträger % (sekundär)"),
+    ("UPTIME", "Laufzeit"),
+    ("NET_DOWN", "Netzwerk-Downloadrate"),
+    ("NET_UP", "Netzwerk-Uploadrate"),
+    ("TIME", "Uhrzeit"),
+    ("DATE", "Datum"),
+    ("MEDIA_TITLE", "Medien: Titel"),
+    ("MEDIA_ARTIST", "Medien: Interpret"),
+    ("MEDIA_ELAPSED", "Medien: Spielzeit"),
+    ("MB_TEMP1", "Mainboard-Temperatur 1 (unbeschriftet)"),
+    ("MB_TEMP2", "Mainboard-Temperatur 2 (unbeschriftet)"),
+    ("MB_TEMP3", "Mainboard-Temperatur 3 (unbeschriftet)"),
+    ("MB_TEMP4", "Mainboard-Temperatur 4 (unbeschriftet)"),
+    ("MB_TEMP5", "Mainboard-Temperatur 5 (unbeschriftet)"),
+    ("MB_TEMP6", "Mainboard-Temperatur 6 (unbeschriftet)"),
 ]
 SENSOR_LABELS = dict(SENSOR_CHOICES)
 DEFAULT_SENSOR_DISPLAY_LABELS = {
@@ -950,15 +951,15 @@ DEFAULT_SENSOR_DISPLAY_LABELS = {
 }
 DATETIME_FORMAT_CHOICES = {
     "TIME": [
-        ("hms", "24-hour HH:MM:SS"),
-        ("hm", "24-hour HH:MM"),
-        ("ampm", "12-hour HH:MM AM/PM"),
+        ("hms", "24-Stunden HH:MM:SS"),
+        ("hm", "24-Stunden HH:MM"),
+        ("ampm", "12-Stunden HH:MM AM/PM"),
     ],
     "DATE": [
-        ("short", "DD Mon"),
-        ("eu", "DD.MM.YYYY"),
-        ("eu_short", "DD.MM."),
-        ("iso", "YYYY-MM-DD"),
+        ("short", "TT Mon"),
+        ("eu", "TT.MM.JJJJ"),
+        ("eu_short", "TT.MM."),
+        ("iso", "JJJJ-MM-TT"),
     ],
 }
 DATETIME_FORMAT_DEFAULTS = {"TIME": "hms", "DATE": "short"}
@@ -972,36 +973,31 @@ DATETIME_FORMAT_DEFAULTS = {"TIME": "hms", "DATE": "short"}
 # is "since this program started", not all-time; Edge vs Hotspot are
 # two distinct, real AMD GPU sensors, not a duplicate/typo.
 SENSOR_DESCRIPTIONS = {
-    "CPU_PCT": "Overall CPU load, averaged across all cores.",
-    **{f"CPU_CORE_{i}": f"Utilization of logical CPU core {i + 1}." for i in range(8)},
-    "CPU_GHZ": "Current CPU clock speed.",
-    "CPU_TEMP": "CPU package temperature.",
-    "RAM_PCT": "RAM used, as a percentage of total.",
-    "RAM_AMOUNT": "RAM used, as an actual amount (e.g. 12.3 GB).",
-    "VRAM_PCT": "GPU VRAM used, as a percentage of total.",
-    "VRAM_AMOUNT": "GPU VRAM used, as an actual amount.",
-    "MAXTEMP": "Highest CPU temp seen since the LCD service last started -- not an all-time record.",
-    "GPU_PCT": "GPU utilization.",
-    "GPU_EDGE_TEMP": "The GPU die's main temperature sensor -- what most tools just call \"GPU temp\".",
-    "GPU_HOTSPOT_TEMP": "The single hottest point on the GPU die -- usually a bit higher than Edge Temp.",
-    "GPU_VRAM_TEMP": "GPU memory (VRAM) temperature -- separate from the GPU die itself.",
-    "SWAP_PCT": "Swap space used, as a percentage of total swap.",
-    "DISK_ROOT_PCT": "Disk space used on your root (/) filesystem.",
-    "DISK_SECONDARY_PCT": "Disk space used on an optional secondary drive, if you have one configured.",
-    "UPTIME": "How long this PC has been running since boot.",
-    "NET_DOWN": "Current network download speed.",
-    "NET_UP": "Current network upload speed.",
-    "TIME": "Current time (same clock as the L1 screen).",
-    "DATE": "Current date (same clock as the L1 screen).",
-    "MEDIA_TITLE": "Currently playing song title, via any MPRIS-compatible player (Spotify, browser tabs, VLC, etc). Blank if nothing's playing.",
-    "MEDIA_ARTIST": "Currently playing artist, same source as Media: Song Title.",
-    "MEDIA_ELAPSED": "Playback position and duration. Bar style shows track progress for media with a known duration.",
-    "MB_TEMP1": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
-    "MB_TEMP2": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
-    "MB_TEMP3": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
-    "MB_TEMP4": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
-    "MB_TEMP5": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
-    "MB_TEMP6": "One of your motherboard's temperature sensors -- your hardware doesn't label what it measures.",
+    "CPU_PCT": "Gesamte CPU-Auslastung, gemittelt über alle Kerne.",
+    **{f"CPU_CORE_{i}": f"Auslastung des logischen CPU-Kerns {i + 1}." for i in range(8)},
+    "CPU_GHZ": "Aktuelle CPU-Taktfrequenz.",
+    "CPU_TEMP": "CPU-Package-Temperatur.",
+    "RAM_PCT": "Belegter RAM in Prozent des Gesamtspeichers.",
+    "RAM_AMOUNT": "Belegter RAM als konkrete Menge (z. B. 12,3 GB).",
+    "VRAM_PCT": "Belegter GPU-VRAM in Prozent des Gesamtspeichers.",
+    "VRAM_AMOUNT": "Belegter GPU-VRAM als konkrete Menge.",
+    "MAXTEMP": "Höchste CPU-Temperatur seit dem letzten Start des LCD-Dienstes – kein Allzeitrekord.",
+    "GPU_PCT": "GPU-Auslastung.",
+    "GPU_EDGE_TEMP": "Der Haupt-Temperatursensor des GPU-Chips – das, was die meisten Tools einfach „GPU-Temperatur“ nennen.",
+    "GPU_HOTSPOT_TEMP": "Der heißeste Punkt auf dem GPU-Chip – meist etwas höher als die Edge-Temperatur.",
+    "GPU_VRAM_TEMP": "Temperatur des GPU-Speichers (VRAM) – getrennt vom GPU-Chip selbst.",
+    "SWAP_PCT": "Belegter Swap-Speicher in Prozent des gesamten Swaps.",
+    "DISK_ROOT_PCT": "Belegter Speicherplatz im Root-Dateisystem (/).",
+    "DISK_SECONDARY_PCT": "Belegter Speicherplatz auf einem optionalen zweiten Laufwerk, falls eingerichtet.",
+    "UPTIME": "Wie lange dieser PC seit dem Start läuft.",
+    "NET_DOWN": "Aktuelle Download-Geschwindigkeit im Netzwerk.",
+    "NET_UP": "Aktuelle Upload-Geschwindigkeit im Netzwerk.",
+    "TIME": "Aktuelle Uhrzeit (dieselbe Uhr wie auf dem L1-Bildschirm).",
+    "DATE": "Aktuelles Datum (dieselbe Uhr wie auf dem L1-Bildschirm).",
+    "MEDIA_TITLE": "Titel des aktuell gespielten Songs über einen MPRIS-kompatiblen Player (Spotify, Browser-Tabs, VLC usw.). Leer, wenn nichts läuft.",
+    "MEDIA_ARTIST": "Aktuell gespielter Interpret, gleiche Quelle wie Medien: Titel.",
+    "MEDIA_ELAPSED": "Wiedergabeposition und Dauer. Der Balkenstil zeigt den Titelfortschritt bei Medien mit bekannter Dauer.",
+    **{f"MB_TEMP{i}": "Einer der Temperatursensoren deines Mainboards – die Hardware gibt nicht an, was er misst." for i in range(1, 7)},
 }
 
 # Only sensors with an honest 0-100 scale (a true percent, a temperature
@@ -1052,7 +1048,7 @@ TEXT_CHAR_PX = 6  # rough estimate for G15_TEXT_SMALL's per-character width -- n
 # continuous scaling exists), so "resize" for Number/Text elements
 # means picking one of these, not a drag handle. Names shown in the
 # UI; values are g510_lcd_stats.c's G15_TEXT_SMALL/MED/LARGE/HUGE (0-3).
-FONT_SIZE_CHOICES = [(0, "Small"), (1, "Medium"), (2, "Large"), (3, "Huge")]
+FONT_SIZE_CHOICES = [(0, "Klein"), (1, "Mittel"), (2, "Groß"), (3, "Riesig")]
 # Self-audit finding: a bar's own height stays fixed regardless of its
 # value text's size (BAR_H doesn't scale), so Large/Huge next to a bar
 # rendered as a big chunky number next to a thin line -- correct, just
@@ -1302,7 +1298,7 @@ def render_preview(screen_num, tag="app", editor=False):
     read; distinct tags avoid that entirely rather than relying on
     both finishing fast enough not to matter."""
     if not STATS_BINARY.exists():
-        return None, {}, "Not built yet -- run install.sh or rebuild the C programs."
+        return None, {}, "Noch nicht gebaut – führe install.sh aus oder baue die C-Programme neu."
     out_path = Path(f"/tmp/g510_app_preview_{tag}.ppm")
     meta_path = Path(str(out_path) + ".meta")
     try:
@@ -1316,30 +1312,30 @@ def render_preview(screen_num, tag="app", editor=False):
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
-            return None, {}, f"Preview render failed: {result.stderr.strip()}"
+            return None, {}, f"Vorschau-Rendering fehlgeschlagen: {result.stderr.strip()}"
     except Exception as e:
-        return None, {}, f"Couldn't run preview: {e}"
+        return None, {}, f"Vorschau konnte nicht gestartet werden: {e}"
 
     try:
         data = out_path.read_bytes()
     except Exception as e:
-        return None, {}, f"Couldn't read preview output: {e}"
+        return None, {}, f"Vorschauausgabe konnte nicht gelesen werden: {e}"
 
     # Minimal hand-rolled P6 PPM parser -- avoids depending on Qt's
     # optional ppm plugin being present on whatever system this runs on.
     if not data.startswith(b"P6"):
-        return None, {}, "Preview output wasn't a valid PPM image."
+        return None, {}, "Die Vorschauausgabe war kein gültiges PPM-Bild."
     parts = data.split(b"\n", 3)
     if len(parts) < 4:
-        return None, {}, "Malformed PPM header."
+        return None, {}, "Ungültiger PPM-Header."
     try:
         w, h = (int(x) for x in parts[1].split())
     except ValueError:
-        return None, {}, "Malformed PPM header."
+        return None, {}, "Ungültiger PPM-Header."
     pixels = parts[3]
     img = QImage(w, h, QImage.Format_RGB888)
     if len(pixels) < w * h * 3:
-        return None, {}, "Truncated PPM data."
+        return None, {}, "PPM-Daten unvollständig."
     for y in range(h):
         row_start = y * w * 3
         img.scanLine(y)  # ensure detach
@@ -1803,23 +1799,40 @@ class CustomScreensTab(QWidget):
         canvas_col = QVBoxLayout()
         canvas_col.setSpacing(12)
 
-        screen_row = QHBoxLayout()
-        screen_row.setSpacing(8)
         self.screen_buttons = {}
+        screen_names = {
+            "L1": "L1\nStandard",
+            "L2": "L2\nSystem",
+            "L3": "L3\nMedia Center",
+            "L4": "L4\nSpiele",
+            "L5": "L5\nNetzwerk",
+        }
+        button_style = (
+            "QPushButton { font-weight: bold; padding: 6px 4px; text-align: center;"
+            " background-color: #2b2e33; border: 1px solid #555; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #3a3e45; }"
+            "QPushButton:checked { background-color: #4a90d9; color: white; border-color: #8fc0f0; }"
+        )
         for key in SCREEN_PREVIEW_KEYS:
-            btn = QPushButton(key)
+            btn = QPushButton(screen_names[key])
             btn.setCheckable(True)
-            btn.setToolTip("Edit the L1 clock screen (reference only)" if key == "L1" else f"Edit the {key} screen, shown by pressing the {key} button on the keyboard")
-            btn.setStyleSheet(
-                "QPushButton { font-weight: bold; padding: 4px 12px; text-align: center; }"
-                "QPushButton:checked { background-color: #4a90d9; color: white; }"
-            )
+            btn.setToolTip("L1 ist der feste Standardbildschirm (Uhr) – er kann nicht verändert werden, nur ansehen" if key == "L1" else f"Bildschirm {key} bearbeiten – wird mit der Taste {key} auf der Tastatur angezeigt")
+            btn.setStyleSheet(button_style)
+            btn.setMinimumHeight(46)
             btn.clicked.connect(lambda _, k=key: self.select_screen(k))
-            screen_row.addWidget(btn)
             self.screen_buttons[key] = btn
-        screen_row.addStretch()
         self.screen_buttons["L2"].setChecked(True)
-        canvas_col.addLayout(screen_row)
+        # Wie am echten Gerät: L1 links neben dem Display, L2–L5 darunter.
+        device_grid = QGridLayout()
+        device_grid.setHorizontalSpacing(12)
+        device_grid.setVerticalSpacing(10)
+        self.screen_buttons["L1"].setFixedWidth(96)
+        self.screen_buttons["L1"].setMinimumHeight(60)
+        device_grid.addWidget(self.screen_buttons["L1"], 0, 0, Qt.AlignVCenter)
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(10)
+        for key in ("L2", "L3", "L4", "L5"):
+            buttons_row.addWidget(self.screen_buttons[key])
 
         # Live, interactive preview -- scaled up 4x (160x43 -> 640x172)
         # so it's actually readable, tinted to match the real
@@ -1852,11 +1865,14 @@ class CustomScreensTab(QWidget):
         self._image_resize_screen = None
         self._image_resize_el = None
         canvas_col.addStretch(1)
-        canvas_col.addWidget(self.preview_canvas, alignment=Qt.AlignHCenter)
+        device_grid.addWidget(self.preview_canvas, 0, 1)
+        device_grid.addLayout(buttons_row, 1, 1)
+        device_grid.setColumnStretch(1, 1)
+        canvas_col.addLayout(device_grid)
 
         self.drag_hint = QLabel(
-            "Drag anything to move it. Hover a bar or a freshly-imported "
-            "image to reveal its resize handle."
+            "Alles per Ziehen verschieben. Mit der Maus über einen Balken oder ein frisch "
+            "importiertes Bild fahren, um den Größengriff anzuzeigen."
         )
         self.drag_hint.setWordWrap(True)
         self.drag_hint.setObjectName("Status")
@@ -1871,15 +1887,15 @@ class CustomScreensTab(QWidget):
         panel_layout.setContentsMargins(14, 14, 14, 14)
         panel_layout.setSpacing(8)
 
-        title = QLabel("LCD Screens")
+        title = QLabel("LCD-Bildschirme")
         title.setObjectName("Title")
         panel_layout.addWidget(title)
 
-        add_section = QLabel("Add Element")
+        add_section = QLabel("Element hinzufügen")
         add_section.setObjectName("PanelSection")
         panel_layout.addWidget(add_section)
         self.sensor_combo = QComboBox()
-        self.sensor_combo.setToolTip("Which stat/sensor to add to this screen -- see the description below once picked")
+        self.sensor_combo.setToolTip("Welcher Wert/Sensor zu diesem Bildschirm hinzugefügt wird – nach der Auswahl erscheint unten eine Beschreibung")
         for key, label in SENSOR_CHOICES:
             self.sensor_combo.addItem(label, key)
         self.sensor_combo.currentIndexChanged.connect(self.on_sensor_changed)
@@ -1894,18 +1910,18 @@ class CustomScreensTab(QWidget):
         panel_layout.addWidget(self.sensor_desc_label)
 
         self.style_combo = QComboBox()
-        self.style_combo.setToolTip("Number: shows the raw value as text. Bar: a filled progress bar (for percentages, temperatures, or media with a known duration)")
-        self.style_combo.addItem("Number", "number")
-        self.style_combo.addItem("Bar", "bar")
+        self.style_combo.setToolTip("Zahl: zeigt den Rohwert als Text. Balken: ein gefüllter Fortschrittsbalken (für Prozentwerte, Temperaturen oder Medien mit bekannter Dauer)")
+        self.style_combo.addItem("Zahl", "number")
+        self.style_combo.addItem("Balken", "bar")
         self.style_combo.currentIndexChanged.connect(self.on_style_changed)
 
-        self.orientation_label = QLabel("Bar Orientation:")
+        self.orientation_label = QLabel("Balkenausrichtung:")
         self.orientation_label.setToolTip(
-            "Vertical bars show a compact label above the fill; resize them by dragging the lower handle."
+            "Senkrechte Balken zeigen eine kompakte Beschriftung über der Füllung; Größe per Ziehen am unteren Griff ändern."
         )
         self.orientation_combo = QComboBox()
-        self.orientation_combo.addItem("Horizontal", "horizontal")
-        self.orientation_combo.addItem("Vertical", "vertical")
+        self.orientation_combo.addItem("Waagerecht", "horizontal")
+        self.orientation_combo.addItem("Senkrecht", "vertical")
 
         # Direct request: "id like to be able to resize elements".
         # Shared between new sensor elements and new text elements --
@@ -1915,11 +1931,11 @@ class CustomScreensTab(QWidget):
         display_options = QGridLayout()
         display_options.setHorizontalSpacing(10)
         display_options.setVerticalSpacing(4)
-        display_options.addWidget(QLabel("Display style:"), 0, 0)
-        display_options.addWidget(QLabel("Text size:"), 0, 1)
+        display_options.addWidget(QLabel("Anzeigestil:"), 0, 0)
+        display_options.addWidget(QLabel("Textgröße:"), 0, 1)
         display_options.addWidget(self.style_combo, 1, 0)
         self.font_size_combo = QComboBox()
-        self.font_size_combo.setToolTip("Size of this element's value text once added (Large/Huge are disabled for Bar style -- no room next to the bar)")
+        self.font_size_combo.setToolTip("Größe des Werttextes dieses Elements nach dem Hinzufügen (Groß/Riesig sind beim Balkenstil deaktiviert – neben dem Balken ist kein Platz)")
         for value, label in FONT_SIZE_CHOICES:
             self.font_size_combo.addItem(label, value)
         display_options.addWidget(self.font_size_combo, 1, 1)
@@ -1933,7 +1949,7 @@ class CustomScreensTab(QWidget):
         self.on_style_changed()  # style_combo starts on "Number" -- sync Large/Huge availability now
 
         self.bar_hint_label = QLabel(
-            "No honest 0-100 scale for this sensor -- shows as a number."
+            "Für diesen Sensor gibt es keine sinnvolle 0–100-Skala – wird als Zahl angezeigt."
         )
         self.bar_hint_label.setObjectName("Status")
         self.bar_hint_label.setWordWrap(True)
@@ -1944,8 +1960,8 @@ class CustomScreensTab(QWidget):
         # index -- populate the description for the startup selection.
         self.on_sensor_changed()
 
-        self.add_btn = add_btn = QPushButton("Add")
-        add_btn.setToolTip("Add the selected sensor to this screen -- drag it into place afterward")
+        self.add_btn = add_btn = QPushButton("Hinzufügen")
+        add_btn.setToolTip("Den gewählten Sensor zu diesem Bildschirm hinzufügen – danach an die richtige Stelle ziehen")
         add_btn.setObjectName("PanelPrimary")
         add_btn.clicked.connect(self.on_add_element)
         panel_layout.addWidget(add_btn)
@@ -1998,27 +2014,27 @@ class CustomScreensTab(QWidget):
         panel_layout.addSpacing(8)
         panel_layout.addWidget(elements_sep)
         panel_layout.addSpacing(4)
-        other_elements_label = QLabel("Other elements:")
+        other_elements_label = QLabel("Weitere Elemente:")
         other_elements_label.setObjectName("PanelSection")
         panel_layout.addWidget(other_elements_label)
 
-        self.import_image_btn = QPushButton("Import Image...")
-        self.import_image_btn.setToolTip("Import a PNG/image, auto-converted to 1-bit for this screen -- simple high-contrast logos/icons look best, see G510_README.md")
+        self.import_image_btn = QPushButton("Bild importieren...")
+        self.import_image_btn.setToolTip("PNG/Bild importieren und automatisch in 1 Bit für diesen Bildschirm umwandeln – einfache, kontrastreiche Logos/Symbole sehen am besten aus, siehe G510_README.md")
         self.import_image_btn.setObjectName("PanelButton")
         self.import_image_btn.clicked.connect(self.on_import_image)
         panel_layout.addWidget(self.import_image_btn)
 
-        self.add_text_btn = QPushButton("Add Text...")
-        self.add_text_btn.setToolTip("Add a short freeform label (e.g. a separator or a static caption)")
+        self.add_text_btn = QPushButton("Text hinzufügen...")
+        self.add_text_btn.setToolTip("Kurze freie Beschriftung hinzufügen (z. B. ein Trenner oder eine feste Bezeichnung)")
         self.add_text_btn.setObjectName("PanelButton")
         self.add_text_btn.clicked.connect(self.on_add_text)
         panel_layout.addWidget(self.add_text_btn)
 
-        self.add_visualizer_btn = QPushButton("Add Visualizer")
+        self.add_visualizer_btn = QPushButton("Visualizer hinzufügen")
         self.add_visualizer_btn.setObjectName("PanelButton")
         self.add_visualizer_btn.setToolTip(
-            "A live audio bar visualizer -- reacts to whatever's actually "
-            "playing on this PC (any player: Brave, Spotify, VLC, etc)."
+            "Ein Live-Audio-Balkenvisualizer – reagiert auf alles, was gerade "
+            "auf diesem PC läuft (jeder Player: Brave, Spotify, VLC usw.)."
         )
         self.add_visualizer_btn.clicked.connect(self.on_add_visualizer)
         panel_layout.addWidget(self.add_visualizer_btn)
@@ -2034,31 +2050,25 @@ class CustomScreensTab(QWidget):
         # this fix could have its content still hanging off the visible
         # screen edge, with its now off-screen hit-box making it hard
         # to grab back. Only shown when something's actually off-screen.
-        self.fix_overflow_btn = QPushButton("Bring off-screen elements back")
-        self.fix_overflow_btn.setToolTip("Pulls any element whose content hangs off the visible screen edge back into view")
+        self.fix_overflow_btn = QPushButton("Elemente außerhalb zurückholen")
+        self.fix_overflow_btn.setToolTip("Holt jedes Element, dessen Inhalt über den sichtbaren Bildschirmrand hinausragt, zurück ins Bild")
         self.fix_overflow_btn.setObjectName("PanelButton")
         self.fix_overflow_btn.clicked.connect(self.on_fix_overflow)
         self.fix_overflow_btn.hide()
         panel_layout.addWidget(self.fix_overflow_btn)
 
-        elements_section = QLabel("Elements on this screen")
+        elements_section = QLabel("Elemente auf diesem Bildschirm")
         elements_section.setObjectName("PanelSection")
         panel_layout.addWidget(elements_section)
-        # Let the element list use the remaining panel height so its
-        # visible area grows with the window instead of wasting space.
-        elements_scroll = QScrollArea()
-        elements_scroll.setWidgetResizable(True)
-        elements_scroll.setMinimumHeight(240)
-        elements_scroll.setFrameShape(QFrame.NoFrame)
-        elements_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Keine eigene Scrollleiste: die Liste wächst mit, das ganze Panel
+        # scrollt nur bei Bedarf.
         elements_container = QWidget()
         self.elements_layout = QVBoxLayout()
         self.elements_layout.setSpacing(2)
         self.elements_layout.setContentsMargins(0, 0, 0, 0)
         self.elements_layout.addStretch()
         elements_container.setLayout(self.elements_layout)
-        elements_scroll.setWidget(elements_container)
-        panel_layout.addWidget(elements_scroll, stretch=1)
+        panel_layout.addWidget(elements_container, stretch=1)
         panel.setLayout(panel_layout)
         # Das ganze Panel scrollt, wenn das Fenster zu niedrig ist, und
         # darf bei breiten Fenstern etwas wachsen.
@@ -2115,16 +2125,19 @@ class CustomScreensTab(QWidget):
     def select_screen(self, key):
         self.current_screen = key
         self.drag_hint.setText(
-            "While a game is running, drag the logo/title or CPU/GPU block in the preview "
-            "to reposition the automatic L4 game dashboard."
+            "Während ein Spiel läuft, Logo/Titel oder CPU-/GPU-Block in der Vorschau ziehen, "
+            "um das automatische L4-Spieldashboard zu positionieren."
             if key == "L4" else
-            "Drag anything to move it. Hover a bar or a freshly-imported "
-            "image to reveal its resize handle."
+            "L3 zeigt automatisch das Media Center (Symbol, Laufschrift, Fortschritt, Spektrum), "
+            "solange hier keine eigenen Elemente liegen. Eigene Elemente ersetzen diese Ansicht."
+            if key == "L3" else
+            "Alles per Ziehen verschieben. Mit der Maus über einen Balken oder ein frisch "
+            "importiertes Bild fahren, um den Größengriff anzuzeigen."
         )
         for k, btn in self.screen_buttons.items():
             btn.setChecked(k == key)
         editable = key != "L1"
-        l1_reason = "L1 is the built-in clock -- it can't be edited." if not editable else ""
+        l1_reason = "L1 ist die eingebaute Uhr – sie lässt sich nicht bearbeiten." if not editable else ""
         self.sensor_combo.setEnabled(editable)
         self.sensor_combo.setToolTip(l1_reason)
         self.style_combo.setEnabled(editable)
@@ -2143,8 +2156,8 @@ class CustomScreensTab(QWidget):
         self.add_visualizer_btn.setEnabled(editable)
         self.add_visualizer_btn.setToolTip(
             l1_reason if not editable else
-            "A live audio bar visualizer -- reacts to whatever's actually "
-            "playing on this PC (any player: Brave, Spotify, VLC, etc)."
+            "Ein Live-Audio-Balkenvisualizer – reagiert auf alles, was gerade "
+            "auf diesem PC läuft (jeder Player: Brave, Spotify, VLC usw.)."
         )
         self.refresh_elements_list()
         self.refresh_preview()
@@ -2203,7 +2216,7 @@ class CustomScreensTab(QWidget):
         elements = self.config[self.current_screen]
         sensor_count = sum(1 for el in elements if el.get("kind", "sensor") == "sensor")
         if sensor_count >= 16:
-            QMessageBox.warning(self, "Screen full", "Each screen supports up to 16 sensor elements.")
+            QMessageBox.warning(self, "Bildschirm voll", "Jeder Bildschirm unterstützt bis zu 16 Sensorelemente.")
             return
         # No X/Y fields anymore -- new elements land at a default spot
         # (stacked below whatever's already there) and you drag them
@@ -2246,8 +2259,8 @@ class CustomScreensTab(QWidget):
         answer = QMessageBox.question(
             self,
             "Bildschirmvorlage anwenden",
-            f"Replace all elements on {self.current_screen} with the "
-            f"{PRESET_NAMES[preset]} layout?",
+            f"Alle Elemente auf {self.current_screen} durch die Vorlage "
+            f"„{PRESET_NAMES[preset]}“ ersetzen?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -2304,15 +2317,15 @@ class CustomScreensTab(QWidget):
         image_count = sum(1 for el in elements if el.get("kind") == "image")
         if image_count >= MAX_IMAGES_PER_SCREEN:
             QMessageBox.warning(
-                self, "Screen full",
-                f"Each screen supports up to {MAX_IMAGES_PER_SCREEN} images -- "
-                "the 160x43 screen is small, more than that rarely fits usefully anyway."
+                self, "Bildschirm voll",
+                f"Jeder Bildschirm unterstützt bis zu {MAX_IMAGES_PER_SCREEN} Bilder – "
+                "der 160x43-Bildschirm ist klein, mehr passt meist ohnehin nicht sinnvoll darauf."
             )
             return
 
         src_path, _ = QFileDialog.getOpenFileName(
-            self, "Choose an image", str(Path.home()),
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif)",
+            self, "Bild auswählen", str(Path.home()),
+            "Bilder (*.png *.jpg *.jpeg *.bmp *.gif)",
         )
         if not src_path:
             return
@@ -2359,15 +2372,15 @@ class CustomScreensTab(QWidget):
                 capture_output=True, text=True, timeout=15,
             )
         except Exception as e:
-            QMessageBox.critical(self, "Import failed", f"Couldn't run the converter: {e}")
+            QMessageBox.critical(self, "Import fehlgeschlagen", f"Der Konverter konnte nicht gestartet werden: {e}")
             return
         if result.returncode != 0:
-            QMessageBox.critical(self, "Import failed", result.stderr.strip() or "Unknown error converting the image.")
+            QMessageBox.critical(self, "Import fehlgeschlagen", result.stderr.strip() or "Unbekannter Fehler bei der Bildumwandlung.")
             return
         try:
             w, h = (int(x) for x in result.stdout.split())
         except ValueError:
-            QMessageBox.critical(self, "Import failed", f"Unexpected converter output: {result.stdout!r}")
+            QMessageBox.critical(self, "Import fehlgeschlagen", f"Unerwartete Konverter-Ausgabe: {result.stdout!r}")
             return
 
         # Stagger by the TOTAL element count on screen, not just other
@@ -2405,13 +2418,13 @@ class CustomScreensTab(QWidget):
         text_count = sum(1 for el in elements if el.get("kind") == "text")
         if text_count >= MAX_TEXTS_PER_SCREEN:
             QMessageBox.warning(
-                self, "Screen full",
-                f"Each screen supports up to {MAX_TEXTS_PER_SCREEN} text fields -- "
-                "the 160x43 screen is small, more than that rarely fits usefully anyway."
+                self, "Bildschirm voll",
+                f"Jeder Bildschirm unterstützt bis zu {MAX_TEXTS_PER_SCREEN} Textfelder – "
+                "der 160x43-Bildschirm ist klein, mehr passt meist ohnehin nicht sinnvoll darauf."
             )
             return
 
-        content, ok = QInputDialog.getText(self, "Add text", "Text to show on the screen:")
+        content, ok = QInputDialog.getText(self, "Text hinzufügen", "Text, der auf dem Bildschirm angezeigt wird:")
         content = content.strip()
         if not ok or not content:
             return
@@ -2442,9 +2455,9 @@ class CustomScreensTab(QWidget):
         viz_count = sum(1 for el in elements if el.get("kind") == "visualizer")
         if viz_count >= MAX_VISUALIZERS_PER_SCREEN:
             QMessageBox.warning(
-                self, "Screen full",
-                f"Each screen supports up to {MAX_VISUALIZERS_PER_SCREEN} visualizer -- "
-                "only one audio stream is captured at a time, a second would just repeat it."
+                self, "Bildschirm voll",
+                f"Jeder Bildschirm unterstützt bis zu {MAX_VISUALIZERS_PER_SCREEN} Visualizer – "
+                "es wird nur ein Audiostream gleichzeitig erfasst, ein zweiter würde ihn nur wiederholen."
             )
             return
 
@@ -2650,7 +2663,7 @@ class CustomScreensTab(QWidget):
 
         if self.current_screen == "L1":
             self.fix_overflow_btn.hide()
-            info = QLabel("L1 is the built-in clock screen -- shown here for reference, not editable.")
+            info = QLabel("L1 ist der eingebaute Uhrbildschirm – hier nur als Referenz zu sehen, nicht bearbeitbar.")
             info.setWordWrap(True)
             info.setObjectName("Status")
             self.elements_layout.addWidget(info)
@@ -2678,7 +2691,7 @@ class CustomScreensTab(QWidget):
         self.fix_overflow_btn.setVisible(overflowing)
 
         if not elements:
-            self.elements_layout.addWidget(QLabel("Nothing on this screen yet."))
+            self.elements_layout.addWidget(QLabel("Auf diesem Bildschirm ist noch nichts."))
             self.elements_layout.addStretch()
             return
         for i, el in enumerate(elements):
@@ -2692,26 +2705,26 @@ class CustomScreensTab(QWidget):
             # and need a horizontal scrollbar, so this stays short.
             if kind == "image":
                 name = Path(el["path"]).stem
-                text = QLabel(f"Image: {name}")
+                text = QLabel(f"Bild: {name}")
                 text.setToolTip(f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px")
             elif kind == "text":
                 text = QLineEdit(el["content"])
-                text.setPlaceholderText("LCD text")
-                text.setAccessibleName("Text shown on the LCD")
-                text.setToolTip("Edit the text shown on the LCD, then press Enter.")
+                text.setPlaceholderText("LCD-Text")
+                text.setAccessibleName("Auf dem LCD angezeigter Text")
+                text.setToolTip("Den auf dem LCD angezeigten Text bearbeiten, dann Enter drücken.")
                 text.editingFinished.connect(
                     lambda idx=i, editor=text: self.on_element_label_edited(idx, editor.text())
                 )
             elif kind == "visualizer":
-                text = QLabel("Visualizer (live audio)")
+                text = QLabel("Visualizer (Live-Audio)")
                 text.setToolTip(f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px")
             else:
                 sensor = el["sensor"]
                 sensor_name = SENSOR_LABELS.get(sensor, sensor)
                 if sensor in DATETIME_FORMAT_CHOICES:
                     text = QComboBox()
-                    text.setAccessibleName(f"{sensor_name} format")
-                    text.setToolTip(f"Choose the {sensor_name.lower()} format; LCD labels are not used.")
+                    text.setAccessibleName(f"{sensor_name} – Format")
+                    text.setToolTip(f"Format für „{sensor_name}“ wählen; LCD-Beschriftungen werden hier nicht verwendet.")
                     compact_formats = {
                         "TIME": {
                             "hms": "24h+S",
@@ -2719,8 +2732,8 @@ class CustomScreensTab(QWidget):
                             "ampm": "12h",
                         },
                         "DATE": {
-                            "short": "DDMon",
-                            "eu": "EU 4Y",
+                            "short": "TTMon",
+                            "eu": "EU 4J",
                             "eu_short": "EU",
                             "iso": "ISO",
                         },
@@ -2741,18 +2754,18 @@ class CustomScreensTab(QWidget):
                         sensor, sensor_name
                     )
                     text = QLineEdit(label)
-                    text.setPlaceholderText("LCD label")
-                    text.setAccessibleName(f"LCD label for {sensor}")
+                    text.setPlaceholderText("LCD-Beschriftung")
+                    text.setAccessibleName(f"LCD-Beschriftung für {sensor}")
                     orientation = (
                         f", {el['orientation']}"
                         if el.get("style") == "bar" and el.get("orientation") == "vertical"
                         else ""
                     )
                     text.setToolTip(
-                        f"Edit LCD label; press Enter to save.\nSensor: {sensor_name}"
-                        f"\nDisplay: {el['style']}{orientation}"
+                        f"LCD-Beschriftung bearbeiten; zum Speichern Enter drücken.\nSensor: {sensor_name}"
+                        f"\nAnzeige: {el['style']}{orientation}"
                         f"\nx={el['x']} y={el['y']}"
-                        + (f" width={el.get('width', 40)}" if el.get("style") == "bar" else "")
+                        + (f" Breite={el.get('width', 40)}" if el.get("style") == "bar" else "")
                     )
                     text.editingFinished.connect(
                         lambda idx=i, editor=text: self.on_element_label_edited(idx, editor.text())
@@ -2784,7 +2797,7 @@ class CustomScreensTab(QWidget):
                 size_btn = QPushButton(size_label)
                 size_btn.setFixedSize(56, 30)
                 size_btn.setStyleSheet("padding: 1px; font-size: 10px;")
-                size_btn.setToolTip("Click to cycle text size: Small -> Medium -> Large -> Huge")
+                size_btn.setToolTip("Klicken, um die Textgröße zu wechseln: Klein -> Mittel -> Groß -> Riesig")
                 size_btn.clicked.connect(lambda _, idx=i: self.on_cycle_font_size(idx))
                 row.addWidget(size_btn)
             else:
@@ -2799,13 +2812,13 @@ class CustomScreensTab(QWidget):
             reset_btn = QPushButton("⌂")
             reset_btn.setFixedSize(28, 30)
             reset_btn.setStyleSheet("padding: 1px;")
-            reset_btn.setToolTip("Reset position to top-left (use if you've dragged this off-screen)")
+            reset_btn.setToolTip("Position auf oben links zurücksetzen (falls du das Element aus dem Bild gezogen hast)")
             reset_btn.clicked.connect(lambda _, idx=i: self.on_reset_position(idx))
             row.addWidget(reset_btn)
             remove_btn = QPushButton("✕")
             remove_btn.setFixedSize(28, 30)
             remove_btn.setStyleSheet("padding: 1px;")
-            remove_btn.setToolTip("Remove this element from the screen")
+            remove_btn.setToolTip("Dieses Element vom Bildschirm entfernen")
             remove_btn.clicked.connect(lambda _, idx=i: self.on_remove_element(idx))
             row.addWidget(remove_btn)
             container = QWidget()
@@ -2844,7 +2857,7 @@ class CustomScreensTab(QWidget):
         # together -- nothing to apply synchronously here anymore.
         pixmap, bounds, err = render_preview(self.screen_number(), tag="editor", editor=True)
         if pixmap is None:
-            print(f"Custom Screens preview error: {err}")  # surfaced in the panel below instead of blocking the canvas
+            print(f"Fehler bei der Vorschau der eigenen Bildschirme: {err}")  # surfaced in the panel below instead of blocking the canvas
             return
         scaled = pixmap.scaled(
             LCD_WIDTH * PREVIEW_SCALE, LCD_HEIGHT * PREVIEW_SCALE,
@@ -2873,28 +2886,219 @@ class CustomScreensTab(QWidget):
                 })
                 elements.append(element)
             self.drag_hint.setText(
-                "Game dashboard active: drag the logo/title or CPU/GPU block to reposition it."
+                "Spieldashboard aktiv: Logo/Titel oder CPU-/GPU-Block ziehen, um es zu positionieren."
             )
         elif self.current_screen == "L4":
             self.drag_hint.setText(
-                "Drag L4 layout elements here. While a game is running, the automatic "
-                "game dashboard is shown instead."
+                "L4-Layoutelemente hier ziehen. Während ein Spiel läuft, wird stattdessen das "
+                "automatische Spieldashboard angezeigt."
             )
         self.preview_canvas.set_data(scaled, elements, bounds)
+
+
+class GameLogosTab(QWidget):
+    """Lists the installed Steam games and lets you replace each game's
+    LCD logo with your own image (stored as
+    ~/.local/share/g510-lcd/custom_logos/<appid>.png)."""
+
+    HIDDEN_WORDS = ("proton", "steam linux runtime", "steamworks", "redistrib")
+
+    def __init__(self):
+        super().__init__()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "pregenerate_game_logos",
+            PROJECT_DIR / "scripts" / "pregenerate-game-logos.py")
+        self.steam = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.steam)
+        self.logo_dir = DATA_DIR / "game_logos"
+        self.custom_dir = DATA_DIR / "custom_logos"
+        self.games = {}
+
+        layout = QHBoxLayout(self)
+        left = QVBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Installierte Spiele durchsuchen...")
+        self.search.textChanged.connect(self.fill_list)
+        self.show_tools = QCheckBox("Proton / Laufzeitumgebungen anzeigen")
+        self.show_tools.toggled.connect(self.fill_list)
+        self.list = QListWidget()
+        self.list.setMinimumWidth(320)
+        self.list.currentItemChanged.connect(self.update_detail)
+        left.addWidget(self.search)
+        left.addWidget(self.list)
+        left.addWidget(self.show_tools)
+        layout.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        self.title_label = QLabel("Spiel auswählen")
+        self.title_label.setWordWrap(True)
+        self.preview = QLabel()
+        self.preview.setFixedSize(160 * 4 + 8, 43 * 4 + 8)
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setStyleSheet("background:#c0d796;border:1px solid #555;")
+        self.source_label = QLabel("")
+        self.choose_btn = QPushButton("Eigenes Logo wählen...")
+        self.choose_btn.clicked.connect(self.choose_logo)
+        self.reset_btn = QPushButton("Zurück zum automatischen Logo")
+        self.reset_btn.clicked.connect(self.reset_logo)
+        hint = QLabel(
+            "Wähle ein klares, kontrastreiches Bild (Weiß auf Dunkel wird automatisch "
+            "invertiert). Es wird zugeschnitten, auf das volle 160x43-Display skaliert "
+            "und zentriert. Das LCD verwendet es beim nächsten Start des Spiels.")
+        hint.setWordWrap(True)
+        for w in (self.title_label, self.preview, self.source_label,
+                  self.choose_btn, self.reset_btn, hint):
+            right.addWidget(w)
+        right.addStretch(1)
+        layout.addLayout(right, 2)
+        self.choose_btn.setEnabled(False)
+        self.reset_btn.setEnabled(False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        libs = self.steam.libraries()
+        self.libs = libs
+        self.games = self.steam.games(libs)
+        self.fill_list()
+        # Creates the automatic logos that don't exist yet; skips the rest.
+        subprocess.Popen(
+            [sys.executable, str(PROJECT_DIR / "scripts" / "pregenerate-game-logos.py")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def fill_list(self, *_):
+        needle = self.search.text().strip().lower()
+        current = self.current_appid()
+        self.list.blockSignals(True)
+        self.list.clear()
+        for appid, name in sorted(self.games.items(), key=lambda g: g[1].lower()):
+            lowered = name.lower()
+            if not self.show_tools.isChecked() and any(w in lowered for w in self.HIDDEN_WORDS):
+                continue
+            if needle and needle not in lowered and needle not in str(appid):
+                continue
+            has_custom = (self.custom_dir / f"{appid}.png").is_file()
+            item = QListWidgetItem(f"{name}  [{appid}]" + ("  *" if has_custom else ""))
+            item.setData(Qt.UserRole, appid)
+            self.list.addItem(item)
+            if appid == current:
+                self.list.setCurrentItem(item)
+        self.list.blockSignals(False)
+        self.update_detail()
+
+    def current_appid(self):
+        item = self.list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def render_bin(self, appid):
+        size_file = self.logo_dir / f"{appid}.size"
+        bin_file = self.logo_dir / f"{appid}.bin"
+        try:
+            w, h = map(int, size_file.read_text().split())
+            data = bin_file.read_bytes()
+        except (OSError, ValueError):
+            return None
+        row = (w + 7) // 8
+        if len(data) < row * h:
+            return None
+        img = QImage(160, 43, QImage.Format_RGB32)
+        img.fill(QColor("#c0d796"))
+        ox, oy = (160 - w) // 2, (43 - h) // 2
+        dark = QColor("#1b2a14").rgb()
+        for y in range(h):
+            for x in range(w):
+                if (data[y * row + x // 8] >> (x % 8)) & 1:
+                    img.setPixel(ox + x, oy + y, dark)
+        return img.scaled(160 * 4, 43 * 4, Qt.KeepAspectRatio, Qt.FastTransformation)
+
+    def update_detail(self, *_):
+        appid = self.current_appid()
+        self.choose_btn.setEnabled(appid is not None)
+        if appid is None:
+            self.title_label.setText("Spiel auswählen")
+            self.preview.clear()
+            self.source_label.setText("")
+            self.reset_btn.setEnabled(False)
+            return
+        self.title_label.setText(f"{self.games.get(appid, '?')}  (App ID {appid})")
+        has_custom = (self.custom_dir / f"{appid}.png").is_file()
+        shipped = (PROJECT_DIR / "assets" / "logos" / f"{appid}.png").is_file()
+        self.reset_btn.setEnabled(has_custom)
+        self.source_label.setText(
+            "Quelle: dein eigenes Logo" if has_custom else
+            "Quelle: im Projekt enthaltenes Logo" if shipped else
+            "Quelle: automatisch (Steam-Artwork)")
+        pix = self.render_bin(appid)
+        if pix is None:
+            self.preview.setText("Noch kein Logo erzeugt – in einem Moment erneut auswählen")
+        else:
+            self.preview.setPixmap(QPixmap.fromImage(pix))
+
+    def convert(self, appid, custom):
+        """Regenerates the cached .bin/.size exactly like the service does."""
+        self.logo_dir.mkdir(parents=True, exist_ok=True)
+        for ext in ("bin", "size"):
+            (self.logo_dir / f"{appid}.{ext}").unlink(missing_ok=True)
+        converter = str(PROJECT_DIR / "src" / "png-to-lcd.py")
+        out = str(self.logo_dir / f"{appid}.bin")
+        if custom:
+            cmd = [sys.executable, converter, str(custom), out, "160", "43",
+                   "--upscale", "--invert-dark"]
+        else:
+            shipped = PROJECT_DIR / "assets" / "logos" / f"{appid}.png"
+            source = shipped if shipped.is_file() else self.steam.find_artwork(self.libs, appid)
+            if not source:
+                return
+            cmd = [sys.executable, converter, str(source), out, "160", "43", "--upscale"]
+            if not shipped.is_file():
+                cmd += ["--trim-transparent", "--invert-dark", "--boost-wide", "--best-logo"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        size = result.stdout.split()
+        if result.returncode == 0 and len(size) >= 2:
+            (self.logo_dir / f"{appid}.size").write_text(f"{size[0]} {size[1]}\n")
+
+    def choose_logo(self):
+        appid = self.current_appid()
+        if appid is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Logo-Bild auswählen", str(Path.home()),
+            "Bilder (*.png *.jpg *.jpeg *.bmp *.gif *.webp)")
+        if not path:
+            return
+        self.custom_dir.mkdir(parents=True, exist_ok=True)
+        target = self.custom_dir / f"{appid}.png"
+        try:
+            QImage(path).save(str(target), "PNG") or shutil.copyfile(path, target)
+        except OSError as exc:
+            QMessageBox.warning(self, "Logo", f"Das Logo konnte nicht gespeichert werden: {exc}")
+            return
+        self.convert(appid, target)
+        self.fill_list()
+
+    def reset_logo(self):
+        appid = self.current_appid()
+        if appid is None:
+            return
+        (self.custom_dir / f"{appid}.png").unlink(missing_ok=True)
+        self.convert(appid, None)
+        self.fill_list()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Logitech G510s Control")
+        self.setWindowTitle("Logitech G510s Steuerung")
         self.setStyleSheet(STYLESHEET)
 
         self.keyboard_tab = KeyboardTab()
         self.custom_tab = CustomScreensTab()
 
         tabs = QTabWidget()
-        tabs.addTab(self.keyboard_tab, "Keyboard & Profiles")
-        tabs.addTab(self.custom_tab, "LCD Screens")
+        tabs.addTab(self.keyboard_tab, "Tastatur && Profile")
+        tabs.addTab(self.custom_tab, "LCD-Bildschirme")
+        self.logos_tab = GameLogosTab()
+        tabs.addTab(self.logos_tab, "Spiel-Logos")
         self.setCentralWidget(tabs)
 
         # Direct request: "make me a save button/feature o dont trust
@@ -2911,30 +3115,37 @@ class MainWindow(QMainWindow):
         # QToolBar (not a wrapper around centralWidget()) so it's
         # visible from every tab without disturbing anything that
         # assumes centralWidget() is the QTabWidget itself.
-        toolbar = self.addToolBar("Save")
+        toolbar = self.addToolBar("Speichern")
         toolbar.setMovable(False)
         # Direct report: "the 'save all settings now' button has a
         # weird rectangle icon before it" -- the floppy-disk emoji
         # (U+1F4BE) has no matching glyph in this system's font stack,
         # so it rendered as a tofu box instead. Plain text avoids the
         # font-coverage gamble entirely.
-        self.save_all_btn = QPushButton("Save All Settings Now")
+        self.save_all_btn = QPushButton("Alle Einstellungen jetzt speichern")
         self.save_all_btn.setObjectName("saveAllBtn")
-        self.save_all_btn.setToolTip("Re-saves everything and verifies it round-trips through disk correctly -- everything already autosaves, this just confirms it")
+        self.save_all_btn.setToolTip("Speichert alles erneut und prüft, ob es korrekt von der Festplatte zurückgelesen wird – alles wird bereits automatisch gespeichert, das hier bestätigt es nur")
         self.save_all_btn.clicked.connect(self.on_save_all)
         toolbar.addWidget(self.save_all_btn)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage(
-            "Every change here already saves to disk immediately -- "
-            "use Save All Settings Now any time you want that verified."
+            "Jede Änderung hier wird sofort auf die Festplatte gespeichert – "
+            "mit „Alle Einstellungen jetzt speichern“ kannst du das jederzeit prüfen lassen."
         )
 
-        # A hardcoded resize() goes stale the moment tab content's
-        # natural size differs (bit us on the sibling G910 app) --
-        # adjustSize() sizes the window to what's actually in it.
+        # Fenstergröße: höchstens so groß, wie der Tab "Tastatur & Profile"
+        # braucht. Größere Tabs scrollen bei Bedarf.
         self.adjustSize()
+        pages = [tabs.widget(i).sizeHint() for i in range(tabs.count())]
+        hint = self.sizeHint()
+        extra_w = hint.width() - max(p.width() for p in pages)
+        extra_h = hint.height() - max(p.height() for p in pages)
+        keyboard_hint = self.keyboard_tab.sizeHint()
+        self.setMaximumSize(keyboard_hint.width() + extra_w,
+                            keyboard_hint.height() + extra_h)
+        self.resize(self.maximumSize())
 
     def on_save_all(self):
         """Real disk round-trip verification, not a cosmetic no-op:
@@ -2963,13 +3174,13 @@ class MainWindow(QMainWindow):
             save_custom_screens(self.custom_tab.config)
             reloaded = load_custom_screens()
             if reloaded != self.custom_tab.config:
-                problems.append("Custom Screens: saved but didn't read back identically")
+                problems.append("Eigene Bildschirme: gespeichert, aber nicht identisch zurückgelesen")
             else:
                 for screen in sorted(self.custom_tab.config.keys()):
                     n = len(self.custom_tab.config[screen])
-                    detail_lines.append(f"    {screen}: {n} element(s)")
+                    detail_lines.append(f"    {screen}: {n} Element(e)")
         except OSError as e:
-            problems.append(f"Custom Screens: {e}")
+            problems.append(f"Eigene Bildschirme: {e}")
 
         # 2. Backlight boot default (set-backlight-color.sh). Apply and
         # Set as Default both already write this immediately -- this
@@ -2981,11 +3192,11 @@ class MainWindow(QMainWindow):
             set_as_default(rgb)
             on_disk = DEFAULTS_SCRIPT_DATA_DIR.read_text()
             if f"{rgb[0]} {rgb[1]} {rgb[2]}" not in on_disk:
-                problems.append("Backlight: saved but didn't read back identically")
+                problems.append("Beleuchtung: gespeichert, aber nicht identisch zurückgelesen")
             else:
-                detail_lines.append(f"    Boot color: #{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
+                detail_lines.append(f"    Startfarbe: #{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
         except OSError as e:
-            problems.append(f"Backlight: {e}")
+            problems.append(f"Beleuchtung: {e}")
 
         # 3. Macros -- each one already writes to macros.json the
         # instant it's recorded (no separate in-memory "pending" macro
@@ -3001,29 +3212,31 @@ class MainWindow(QMainWindow):
                         macro_counts[profile] = len(keys)
             if macro_counts:
                 for profile in sorted(macro_counts):
-                    detail_lines.append(f"    {profile}: {macro_counts[profile]} macro(s) assigned")
+                    detail_lines.append(f"    {profile}: {macro_counts[profile]} Makro(s) zugewiesen")
             else:
-                detail_lines.append("    (no macros assigned yet)")
+                detail_lines.append("    (noch keine Makros zugewiesen)")
         except (OSError, json.JSONDecodeError) as e:
-            problems.append(f"Macros: {e}")
+            problems.append(f"Makros: {e}")
 
         now = datetime.datetime.now().strftime("%H:%M:%S")
         if problems:
-            msg = "Save FAILED at " + now + ":\n\n" + "\n".join(problems)
+            msg = "Speichern FEHLGESCHLAGEN um " + now + ":\n\n" + "\n".join(problems)
             self.status.showMessage("✗ " + msg.replace("\n", " "))
-            QMessageBox.critical(self, "Save failed", msg)
+            QMessageBox.critical(self, "Speichern fehlgeschlagen", msg)
         else:
             msg = (
-                f"Verified on disk at {now}:\n\n"
-                "Custom Screens:\n" + "\n".join(detail_lines[:len(self.custom_tab.config)]) + "\n\n"
-                "Backlight + Macros:\n" + "\n".join(detail_lines[len(self.custom_tab.config):])
+                f"Auf der Festplatte bestätigt um {now}:\n\n"
+                "Eigene Bildschirme:\n" + "\n".join(detail_lines[:len(self.custom_tab.config)]) + "\n\n"
+                "Beleuchtung + Makros:\n" + "\n".join(detail_lines[len(self.custom_tab.config):])
             )
-            self.status.showMessage(f"✓ Saved & verified on disk at {now}")
-            QMessageBox.information(self, "Saved", msg)
+            self.status.showMessage(f"✓ Um {now} gespeichert und auf der Festplatte bestätigt")
+            QMessageBox.information(self, "Gespeichert", msg)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    icon_path = PROJECT_DIR / "assets" / "icon" / "g510-lcd.png"
+    app.setWindowIcon(QIcon(str(icon_path)))
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())

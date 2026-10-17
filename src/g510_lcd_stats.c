@@ -2308,6 +2308,38 @@ static int g_element_bounds_count = 0;
 static game_element_bounds_t g_game_element_bounds[3];
 static int g_game_element_bounds_count = 0;
 
+/* Long song/video titles scroll through a fixed window (marquee) instead
+   of being cut off: pause at the start, scroll left, pause, wrap around. */
+static int g_marquee_active = 0;
+
+static int draw_marquee_text(g15canvas *c, const char *text, int font_size,
+                             int x, int y, int window_w) {
+    int text_w = measure_builtin_text_width(text, font_size);
+    if (text_w <= window_w) return 0;
+    g_marquee_active = 1;
+    const int gap = 24, px_per_sec = 22, pause_ms = 1500;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long ms = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    long cycle_px = text_w + gap;
+    long cycle_ms = pause_ms + cycle_px * 1000L / px_per_sec;
+    long t = ms % cycle_ms;
+    int offset = t < pause_ms ? 0 : (int)((t - pause_ms) * px_per_sec / 1000L);
+
+    g15canvas scratch G15_CANVAS_AUTO = {0};
+    g15r_initCanvas(&scratch);
+    g15r_clearScreen(&scratch, G15_COLOR_WHITE);
+    g15r_renderString(&scratch, (unsigned char*)text, 0, font_size, 0, 0);
+    for (int row = 0; row < G15_LCD_HEIGHT; row++) {
+        for (int col = 0; col < window_w; col++) {
+            int src = (offset + col) % (int)cycle_px;
+            if (src < text_w && g15r_getPixel(&scratch, src, row))
+                g15r_setPixel(c, x + col, y + row, G15_COLOR_BLACK);
+        }
+    }
+    return 1;
+}
+
 static void draw_element(g15canvas *c, element_t *el) {
     const sensor_def_t *def = find_sensor(el->sensor);
     if (!def) return;
@@ -2393,6 +2425,23 @@ static void draw_element(g15canvas *c, element_t *el) {
            time. el->x (dragging up/down) still moves the row's Y --
            only X is forced to center. */
         int label_block = (label_w && !vertical_bar) ? label_w + gap : 0;
+        if (strcmp(el->sensor, "MEDIA_TITLE") == 0
+                || strcmp(el->sensor, "MEDIA_ARTIST") == 0) {
+            const char *full = strcmp(el->sensor, "MEDIA_TITLE") == 0
+                ? g_media_title : g_media_artist;
+            int window = G15_LCD_WIDTH - 2 * TEXT_EDGE_MARGIN - label_block;
+            if (draw_marquee_text(c, full, el->font_size,
+                                  TEXT_EDGE_MARGIN + label_block, el->y, window)) {
+                if (label_block)
+                    draw_builtin_label(c, sized_label, TEXT_EDGE_MARGIN, el->y, el->font_size);
+                if (b) {
+                    b->label_x1 = TEXT_EDGE_MARGIN;
+                    b->label_x2 = TEXT_EDGE_MARGIN + label_block;
+                    b->value_x2 = TEXT_EDGE_MARGIN + label_block + window;
+                }
+                return;
+            }
+        }
         truncate_sensor_value(disp, el->font_size,
                               G15_LCD_WIDTH - 2 * TEXT_EDGE_MARGIN - label_block,
                               def->is_temp);
@@ -2710,6 +2759,10 @@ static int convert_game_artwork(const char *source, const char *title,
             execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
                    source, output, max_width, max_height, "--upscale",
                    (char *)NULL);
+        else if (strstr(source, "/custom_logos/"))
+            execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
+                   source, output, max_width, max_height, "--upscale",
+                   "--invert-dark", (char *)NULL);
         else
             execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
                    source, output, max_width, max_height, "--trim-transparent",
@@ -2832,10 +2885,15 @@ static void update_game_logo(void) {
     int width = 0, height = 0, converted = 0;
     /* Hand-made line logos (assets/logos/<appid>.png) take precedence. */
     char custom[400];
-    snprintf(custom, sizeof(custom), PROJECT_DIR "/assets/logos/%d.png",
-             g_media_game_appid);
     char size_path[340];
     snprintf(size_path, sizeof(size_path), "%s/%d.size", logo_dir, g_media_game_appid);
+    /* Own logos in ~/.local/share/g510-lcd/custom_logos/<appid>.png win
+       over the ones shipped in the project. */
+    snprintf(custom, sizeof(custom), "%s/custom_logos/%d.png", data_dir(),
+             g_media_game_appid);
+    if (access(custom, R_OK) != 0)
+        snprintf(custom, sizeof(custom), PROJECT_DIR "/assets/logos/%d.png",
+                 g_media_game_appid);
     if (access(custom, R_OK) == 0)
         converted = convert_game_artwork(custom, NULL, output, &width, &height);
     /* Logos from pregenerate-game-logos.py (or an earlier run) are reused. */
@@ -3221,6 +3279,70 @@ static void draw_visualizer_element(g15canvas *c, visualizer_t *vz) {
     }
 }
 
+/* Automatic "Media Center" layout of screen L3 (used while L3 has no
+   elements of its own): play/pause icon, scrolling title and artist,
+   progress bar with elapsed/total time and the spectrum at the bottom. */
+static void draw_media_text(g15canvas *c, const char *text, int font_size,
+                            int x, int y, int window_w) {
+    if (draw_marquee_text(c, text, font_size, x, y, window_w)) return;
+    g15r_renderString(c, (unsigned char*)text, 0, font_size, x, y);
+}
+
+static void draw_media_icon(g15canvas *c, int x, int y, int playing) {
+    if (playing) {
+        for (int i = 0; i < 5; i++)
+            g15r_pixelBox(c, x + i, y + i, x + i, y + 8 - i, G15_COLOR_BLACK, 1, 1);
+    } else {
+        g15r_pixelBox(c, x, y, x + 2, y + 8, G15_COLOR_BLACK, 1, 1);
+        g15r_pixelBox(c, x + 5, y, x + 7, y + 8, G15_COLOR_BLACK, 1, 1);
+    }
+}
+
+static void draw_media_dashboard(g15canvas *c) {
+    const int text_x = 14, text_w = G15_LCD_WIDTH - text_x - 3;
+    if (!g_media_title[0]) {
+        draw_media_icon(c, 70, 6, 0);
+        const char *idle = "Keine Wiedergabe";
+        int w = measure_builtin_text_width(idle, G15_TEXT_MED);
+        g15r_renderString(c, (unsigned char*)idle, 0, G15_TEXT_MED,
+                          (G15_LCD_WIDTH - w) / 2, 20);
+        visualizer_t vz = {0, 31, G15_LCD_WIDTH, 12};
+        draw_visualizer_element(c, &vz);
+        return;
+    }
+    int has_artist = g_media_artist[0] != 0;
+    int has_bar = g_media_progress_pct >= 0 && strchr(g_media_elapsed, '/');
+    int is_live = strcmp(g_media_elapsed, "LIVE") == 0;
+
+    draw_media_icon(c, 3, has_artist ? 1 : 4, g_media_playing);
+    draw_media_text(c, g_media_title, G15_TEXT_LARGE, text_x,
+                    has_artist ? 0 : 3, text_w);
+    if (has_artist)
+        draw_media_text(c, g_media_artist, G15_TEXT_MED, text_x, 11, text_w);
+
+    int viz_y = 31;
+    if (has_bar) {
+        char elapsed[32], total[32];
+        snprintf(elapsed, sizeof(elapsed), "%s", g_media_elapsed);
+        char *sep = strchr(elapsed, '/');
+        *sep = 0;
+        snprintf(total, sizeof(total), "%s", sep + 1);
+        int total_w = measure_builtin_text_width(total, G15_TEXT_SMALL);
+        int elapsed_w = measure_builtin_text_width(elapsed, G15_TEXT_SMALL);
+        g15r_renderString(c, (unsigned char*)elapsed, 0, G15_TEXT_SMALL, 2, 21);
+        g15r_renderString(c, (unsigned char*)total, 0, G15_TEXT_SMALL,
+                          G15_LCD_WIDTH - 2 - total_w, 21);
+        draw_slim_bar(c, 2 + elapsed_w + 4, G15_LCD_WIDTH - 2 - total_w - 4,
+                      22, BAR_H, (int)g_media_progress_pct);
+    } else if (is_live) {
+        g15r_renderString(c, (unsigned char*)"LIVE", 0, G15_TEXT_SMALL, 2, 21);
+    } else {
+        viz_y = 24;
+    }
+    visualizer_t vz = {0, viz_y, G15_LCD_WIDTH, G15_LCD_HEIGHT - viz_y};
+    draw_visualizer_element(c, &vz);
+}
+
 static void draw_custom_screen(g15canvas *c, int screen_num) {
     g_element_bounds_count = 0;
     if (screen_num == GAME_SCREEN && g_media_is_game) {
@@ -3237,6 +3359,11 @@ static void draw_custom_screen(g15canvas *c, int screen_num) {
        draws nothing -- matches what the real LCD should show for a
        screen with nothing on it. */
     if (cs->count == 0 && cs->image_count == 0 && cs->text_count == 0 && cs->visualizer_count == 0) {
+        if (screen_num == MUSIC_SCREEN) {
+            draw_media_dashboard(c);
+            g_marquee_active = 1; /* spectrum needs the fast redraw */
+            return;
+        }
         if (screen_num == GAME_SCREEN && g_media_is_game && g_media_title[0]) {
             char title[sizeof(g_media_title)];
             snprintf(title, sizeof(title), "%s", g_media_title);
@@ -3359,6 +3486,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (screen >= 2 && screen <= 5) {
+            g_marquee_active = 0;
             draw_custom_screen(&canvas, screen);
             send_frame(&canvas);
             /* Only speed up the redraw loop for screens that actually
@@ -3366,7 +3494,7 @@ int main(int argc, char **argv) {
                screen gains nothing from redrawing 10x/sec and would
                just burn CPU and USB bandwidth for no visible change. */
             custom_screen_t *cs = &custom_screens[screen - 2];
-            if (cs->visualizer_count > 0) {
+            if (cs->visualizer_count > 0 || g_marquee_active) {
                 /* Was ~10fps (100ms). Direct request: "i need the
                    visualizer respons faster" -- the real bottleneck
                    turned out to be capture latency (see

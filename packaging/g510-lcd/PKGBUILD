@@ -89,6 +89,8 @@ EOF
 
   install -Dm644 packaging/g510-lcd/g510-lcd.desktop \
     "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 assets/icon/g510-lcd.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/g510-lcd.png"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -97,9 +97,14 @@ def main():
         # Handgepflegte Strich-Logos (z. B. DOOM) haben Vorrang.
         custom = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), "assets", "logos", f"{appid}.png")
-        if os.path.isfile(custom):
+        own = os.path.expanduser(
+            f"~/.local/share/g510-lcd/custom_logos/{appid}.png")
+        if os.path.isfile(own):
+            source = custom = own
+        elif os.path.isfile(custom):
             source = custom
-        flags = (["--upscale"] if source == custom else
+        flags = ((["--upscale", "--invert-dark"] if source == own else ["--upscale"])
+                 if source == custom else
                  ["--trim-transparent", "--upscale", "--invert-dark",
                   "--boost-wide", "--best-logo"])
         size = run([CONVERTER, source, output, "160", "43"] + flags) \

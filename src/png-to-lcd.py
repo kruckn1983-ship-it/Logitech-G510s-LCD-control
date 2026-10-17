@@ -48,7 +48,7 @@ if has_alpha:
     if trim_transparent:
         visible_bounds = alpha.getbbox()
         if not visible_bounds:
-            raise ValueError(f"{infile} contains no visible pixels")
+            raise ValueError(f"{infile} enthält keine sichtbaren Pixel")
         img = img.crop(visible_bounds)
         alpha = img.getchannel("A")
     visible_rgb = img.convert("RGB")

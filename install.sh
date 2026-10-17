@@ -187,7 +187,7 @@ Categories=Utility;"
 
 write_shortcut "G510 LCD - App" "g510-lcd-app" \
     "G510 keyboard LCD control app (backlight, service control)" \
-    "python3 \"$DIR/src/g510_app.py\"" "preferences-desktop-color"
+    "python3 \"$DIR/src/g510_app.py\"" "$DIR/assets/icon/g510-lcd.png"
 
 write_shortcut "G510 LCD - Rebuild" "g510-lcd-rebuild" \
     "Recompile the keyboard LCD program after editing and restart it" \
