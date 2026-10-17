@@ -2514,7 +2514,7 @@ static void update_game_logo(void) {
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
         close(pipefd[1]);
-        char max_width[] = "64", max_height[] = "38";
+        char max_width[] = "72", max_height[] = "41";
         execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
                source, output, max_width, max_height, (char *)NULL);
         perror("g510-lcd-stats: cannot run game-logo converter");
@@ -2539,7 +2539,7 @@ static void update_game_logo(void) {
         return;
     }
     if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0
-            || width <= 0 || width > 64 || height <= 0 || height > 38) {
+            || width <= 0 || width > 72 || height <= 0 || height > 41) {
         fprintf(stderr, "g510-lcd-stats: Steam artwork conversion failed for game %d\n",
                 g_media_game_appid);
         return;
@@ -2557,35 +2557,37 @@ static void draw_game_dashboard(g15canvas *c) {
     if (g_game_logo_active) draw_image_element(c, &g_game_logo);
 
     char value[32];
+    int label_x = g_game_logo_active
+        ? g_game_logo.x + g_game_logo.width + 4 : 12;
+    int value_x = g_game_logo_active ? label_x + 32 : 12;
     int cpu_temp = get_cpu_temp_c();
-    g15r_G15FPrint(c, (char *)"CPU", 75, 4, G15_TEXT_MED,
+    int cpu_label_y = g_game_logo_active ? 4 : 3;
+    int cpu_value_y = g_game_logo_active ? 0 : 11;
+    g15r_G15FPrint(c, (char *)"CPU", label_x, cpu_label_y, G15_TEXT_MED,
                    G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
     if (cpu_temp >= 0) {
         snprintf(value, sizeof(value), "%dC", cpu_temp);
-        draw_sensor_value(c, value, 105, 4, G15_TEXT_MED, 1);
+        draw_sensor_value(c, value, value_x, cpu_value_y, G15_TEXT_LARGE, 1);
     } else {
-        g15r_G15FPrint(c, (char *)"N/A", 105, 4, G15_TEXT_MED,
+        g15r_G15FPrint(c, (char *)"N/A", value_x, cpu_value_y, G15_TEXT_LARGE,
                        G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
     }
 
     int gpu_temp = get_gpu_temp_c(0);
-    g15r_G15FPrint(c, (char *)"GPU", 75, 22, G15_TEXT_MED,
+    int gpu_label_y = g_game_logo_active ? 25 : 3;
+    int gpu_value_y = g_game_logo_active ? 21 : 11;
+    int gpu_x = g_game_logo_active ? label_x : 88;
+    int gpu_value_x = g_game_logo_active ? value_x : 88;
+    g15r_G15FPrint(c, (char *)"GPU", gpu_x, gpu_label_y, G15_TEXT_MED,
                    G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
     if (gpu_temp >= 0) {
         snprintf(value, sizeof(value), "%dC", gpu_temp);
-        draw_sensor_value(c, value, 105, 22, G15_TEXT_MED, 1);
+        draw_sensor_value(c, value, gpu_value_x, gpu_value_y,
+                          G15_TEXT_LARGE, 1);
     } else {
-        g15r_G15FPrint(c, (char *)"N/A", 105, 22, G15_TEXT_MED,
+        g15r_G15FPrint(c, (char *)"N/A", gpu_value_x, gpu_value_y,
+                       G15_TEXT_LARGE,
                        G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
-    }
-
-    if (g_media_title[0]) {
-        char title[sizeof(g_media_title)];
-        snprintf(title, sizeof(title), "%s", g_media_title);
-        int title_x = g_game_logo_active ? 75 : 2;
-        truncate_builtin_label(title, G15_TEXT_SMALL,
-                               G15_LCD_WIDTH - title_x - 2);
-        draw_builtin_label(c, title, title_x, 35, G15_TEXT_SMALL);
     }
 }
 
