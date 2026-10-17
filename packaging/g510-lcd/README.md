@@ -10,7 +10,8 @@ Das Paket wurde auf dem echten Rechner erstellt und installiert (`sudo pacman -U
 
 ```sh
 depends=('python' 'python-pyqt5' 'python-pillow' 'python-evdev'
-         'ydotool' 'freetype2' 'libg15render')
+         'ydotool' 'freetype2' 'zenity' 'playerctl' 'wmctrl'
+         'libg15' 'libg15render')
 ```
 
 Die Abhängigkeiten wurden mit dem Quellcode abgeglichen und nicht ungeprüft aus `install.sh` übernommen. `yad` steht zwar in der `pacman`-Zeile des Installationsskripts, wird laut einer Suche in allen aktuellen `.py`- und `.c`-Dateien aber nirgends verwendet. Es ist ein Überbleibsel des eingestellten yad-basierten Beleuchtungsskripts (siehe den Eintrag `legacy-yad-backlight-script` in `BRANCHES.md`) und wurde hier daher korrekt weggelassen. `python-pillow` wird hingegen tatsächlich benötigt: `png-to-lcd.py` verwendet Floyd-Steinberg-Dithering für den Bildimport in Custom Screens.

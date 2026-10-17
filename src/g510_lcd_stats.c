@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <math.h>
 #include <unistd.h>
@@ -720,6 +721,38 @@ static void media_title_from_url(const char *url, char *out, size_t outlen) {
     out[written] = 0;
 }
 
+static int media_name_is_generic(const char *name) {
+    return !name[0] || strcasecmp(name, "Playback Stream") == 0
+        || strcasecmp(name, "playback") == 0
+        || strncasecmp(name, "audio stream", 12) == 0;
+}
+
+static int media_title_from_window_pid(int pid, char *out, size_t outlen) {
+    if (pid <= 0 || outlen == 0) return 0;
+    FILE *p = popen("wmctrl -lp 2>/dev/null", "r");
+    if (!p) return 0;
+
+    int found = 0;
+    char line[1024], title[768], host[128];
+    while (fgets(line, sizeof(line), p)) {
+        int window_pid = 0;
+        if (sscanf(line, "%*s %*s %d %127s %767[^\n]",
+                   &window_pid, host, title) == 3 && window_pid == pid) {
+            while (isspace((unsigned char)*title)) memmove(title, title + 1, strlen(title));
+            size_t len = strlen(title);
+            while (len > 0 && isspace((unsigned char)title[len - 1]))
+                title[--len] = 0;
+            if (len > 0) {
+                snprintf(out, outlen, "%s", title);
+                found = 1;
+                break;
+            }
+        }
+    }
+    pclose(p);
+    return found;
+}
+
 static void update_media_info(void) {
     g_media_title[0] = 0;
     g_media_artist[0] = 0;
@@ -756,7 +789,9 @@ static void update_media_info(void) {
        are both active, keep plasma-browser-integration's richer
        title/artist and the raw browser player's accurate timing. VLC
        can omit title entirely; in that case use the media URL's
-       filename before falling back to PulseAudio's generic stream name. */
+       filename. For non-MPRIS applications, use PulseAudio stream
+       metadata and resolve generic stream names through the process's
+       window title when available. */
     FILE *p = popen("playerctl -a metadata --format "
                      "'{{ playerName }}\x1f{{ title }}\x1f{{ artist }}\x1f{{ position }}\x1f{{ mpris:length }}\x1f{{ status }}\x1f{{ xesam:url }}' 2>/dev/null", "r");
     if (!p) return;
@@ -824,11 +859,16 @@ static void update_media_info(void) {
         FILE *pa = popen("LC_ALL=C pactl list sink-inputs 2>/dev/null", "r");
         if (pa) {
             char pl[512], name[256] = "";
+            char app_name[128] = "";
+            int process_id = 0;
             int corked = 0;
             while (fgets(pl, sizeof(pl), pa)) {
                 if (strncmp(pl, "Sink Input", 10) == 0) {
-                    if (name[0] && !corked) break;
-                    name[0] = 0; corked = 0;
+                    if ((name[0] || process_id > 0) && !corked) break;
+                    name[0] = 0;
+                    app_name[0] = 0;
+                    process_id = 0;
+                    corked = 0;
                 } else if (strstr(pl, "Corked: yes")) {
                     corked = 1;
                 } else {
@@ -838,20 +878,33 @@ static void update_media_info(void) {
                         char *q = strrchr(m, '"');
                         if (q) *q = 0;
                         snprintf(name, sizeof(name), "%s", m);
+                    } else if ((m = strstr(pl, "application.name = \""))) {
+                        m += strlen("application.name = \"");
+                        char *q = strrchr(m, '"');
+                        if (q) *q = 0;
+                        snprintf(app_name, sizeof(app_name), "%s", m);
+                    } else if ((m = strstr(pl, "application.process.id = \""))) {
+                        process_id = atoi(m + strlen("application.process.id = \""));
                     }
                 }
             }
             pclose(pa);
-            if (name[0] && !corked && strcmp(name, "Playback Stream") != 0
-                    && strcmp(name, "playback") != 0) {
+            if (!corked && (name[0] || process_id > 0)) {
                 g_media_playing = 1;
-                char *sep = strstr(name, " - ");
-                if (sep) {
-                    *sep = 0;
-                    snprintf(artist_buf, sizeof(artist_buf), "%.47s", name);
-                    snprintf(title_buf, sizeof(title_buf), "%.63s", sep + 3);
+                if (!media_name_is_generic(name)) {
+                    char *sep = strstr(name, " - ");
+                    if (sep) {
+                        *sep = 0;
+                        snprintf(artist_buf, sizeof(artist_buf), "%.47s", name);
+                        snprintf(title_buf, sizeof(title_buf), "%.63s", sep + 3);
+                    } else {
+                        snprintf(title_buf, sizeof(title_buf), "%.63s", name);
+                    }
                 } else {
-                    snprintf(title_buf, sizeof(title_buf), "%.63s", name);
+                    if (!media_title_from_window_pid(process_id, title_buf,
+                                                     sizeof(title_buf))
+                            && app_name[0] && !media_name_is_generic(app_name))
+                        snprintf(title_buf, sizeof(title_buf), "%.63s", app_name);
                 }
             }
         }
@@ -1302,31 +1355,32 @@ static int write_screen(int screen) {
 }
 
 static void update_media_screen_selection(void) {
-    static int media_screen_active = 0;
-    static int return_screen = 0;
-    static int last_auto_screen = MEDIA_SCREEN;
+    static int playback_active = 0;
+    static int media_screen_dismissed = 0;
+    static int last_screen = -1;
     int screen = read_screen();
 
-    if (g_media_playing) {
-        if (!media_screen_active) {
-            return_screen = screen;
-            media_screen_active = 1;
-        } else if (screen != last_auto_screen) {
-            return_screen = screen;
-        }
-
-        if (screen != MEDIA_SCREEN && write_screen(MEDIA_SCREEN))
-            last_auto_screen = MEDIA_SCREEN;
-        else if (screen == MEDIA_SCREEN)
-            last_auto_screen = MEDIA_SCREEN;
-    } else if (media_screen_active) {
-        if (screen != last_auto_screen) {
-            return_screen = screen;
-            media_screen_active = 0;
-        } else if (screen == return_screen || write_screen(return_screen)) {
-            media_screen_active = 0;
-        }
+    if (!g_media_playing) {
+        playback_active = 0;
+        media_screen_dismissed = 0;
+        last_screen = screen;
+        return;
     }
+
+    if (!playback_active) {
+        playback_active = 1;
+        media_screen_dismissed = 0;
+        if (screen != MEDIA_SCREEN && write_screen(MEDIA_SCREEN))
+            screen = MEDIA_SCREEN;
+    } else {
+        if (!media_screen_dismissed && screen != last_screen
+                && screen != MEDIA_SCREEN)
+            media_screen_dismissed = 1;
+        if (!media_screen_dismissed && screen != MEDIA_SCREEN
+                && write_screen(MEDIA_SCREEN))
+            screen = MEDIA_SCREEN;
+    }
+    last_screen = screen;
 }
 
 /* L1's default stats slot mirrors L2's configured layout. L1's button

@@ -26,6 +26,7 @@ Installierte Pakete und ihre Aufgaben:
 | `freetype2` | Darstellung der benutzerdefinierten LCD-Schriftart |
 | `zenity` | Bestätigungsdialog beim Neustart über die Desktop-Verknüpfung |
 | `playerctl` | Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums für die Mediensensoren |
+| `wmctrl` | Fenstertitel als Ersatz für generische Audiostream-Namen, etwa bei Spielen ohne MPRIS |
 | `libg15`, `libg15render` (AUR, über `yay`/`paru`) | Bibliothek für das Pixel- und Bildformat des LCDs |
 
 `install.sh` kann keinen AUR-Helfer installieren. Installiere zuerst `yay` oder `paru`, falls noch keiner vorhanden ist, und führe danach `install.sh` aus.
