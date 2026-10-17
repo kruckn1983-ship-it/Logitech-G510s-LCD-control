@@ -32,7 +32,7 @@ cp -r "$DIR/drivers/libg15render" "$BUILD/libg15render"
 (
     cd "$BUILD/libg15render"
     autoreconf -fi >/dev/null 2>&1
-    CFLAGS="-O2 -I$PREFIX/include" LDFLAGS="-L$PREFIX/lib" ./configure --prefix="$PREFIX" --enable-ttf >/dev/null
+    CFLAGS="-O2 -I$PREFIX/include $(pkg-config --cflags freetype2)" LDFLAGS="-L$PREFIX/lib" ./configure --prefix="$PREFIX" --enable-ttf >/dev/null
     make -j"$JOBS" >/dev/null
     sudo make install >/dev/null
 )
