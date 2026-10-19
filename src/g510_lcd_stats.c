@@ -2914,10 +2914,20 @@ static int convert_game_artwork(const char *source, const char *title,
             execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
                    source, output, max_width, max_height, "--upscale",
                    (char *)NULL);
-        else if (strstr(source, "/custom_logos/"))
-            execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
-                   source, output, max_width, max_height, "--upscale",
-                   "--invert-dark", (char *)NULL);
+        else if (strstr(source, "/custom_logos/")) {
+            char marker[1024];
+            snprintf(marker, sizeof(marker), "%s", source);
+            char *extension = strrchr(marker, '.');
+            if (extension && (size_t)(extension - marker) + sizeof(".optimized") <= sizeof(marker))
+                strcpy(extension, ".optimized");
+            if (access(marker, R_OK) == 0)
+                execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
+                       source, output, max_width, max_height, "--lcd-logo", (char *)NULL);
+            else
+                execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
+                       source, output, max_width, max_height, "--upscale",
+                       "--invert-dark", (char *)NULL);
+        }
         else
             execlp("python3", "python3", PROJECT_DIR "/src/png-to-lcd.py",
                    source, output, max_width, max_height, "--trim-transparent",

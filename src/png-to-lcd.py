@@ -10,8 +10,8 @@ import os
 from PIL import Image, ImageOps, ImageStat
 
 options = set(sys.argv[5:])
-if len(sys.argv) < 5 or options - {"--trim-transparent", "--upscale", "--invert-dark", "--boost-wide", "--best-logo"}:
-    print("usage: png-to-lcd.py <input.png> <output.bin> <max_width> <max_height> [--trim-transparent] [--upscale] [--invert-dark] [--boost-wide] [--best-logo]")
+if len(sys.argv) < 5 or options - {"--trim-transparent", "--upscale", "--invert-dark", "--boost-wide", "--best-logo", "--lcd-logo"}:
+    print("usage: png-to-lcd.py <input.png> <output.bin> <max_width> <max_height> [--trim-transparent] [--upscale] [--invert-dark] [--boost-wide] [--best-logo] [--lcd-logo]")
     sys.exit(1)
 
 infile, outfile, max_width, max_height = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
@@ -20,6 +20,29 @@ allow_upscale = "--upscale" in options
 invert_dark = "--invert-dark" in options
 boost_wide = "--boost-wide" in options
 best_logo = "--best-logo" in options
+lcd_logo = "--lcd-logo" in options
+if lcd_logo:
+    trim_transparent = allow_upscale = invert_dark = True
+
+
+def logo_threshold(image):
+    """Otsu split: retain the source's foreground rather than a target ink density."""
+    histogram = image.histogram()
+    count = sum(histogram)
+    total = sum(i * n for i, n in enumerate(histogram))
+    left_count = left_sum = 0
+    best_variance, threshold = -1, 128
+    for i, n in enumerate(histogram):
+        left_count += n
+        left_sum += i * n
+        right_count = count - left_count
+        if not left_count or not right_count:
+            continue
+        variance = left_count * right_count * (
+            left_sum / left_count - (total - left_sum) / right_count) ** 2
+        if variance > best_variance:
+            best_variance, threshold = variance, i + 1
+    return threshold
 
 img = Image.open(infile)
 
@@ -39,6 +62,10 @@ has_alpha = (
     or (img.mode == "P" and "transparency" in img.info)
     or "transparency" in img.info
 )
+if has_alpha:
+    # Qt saves imports as RGBA even when every pixel is opaque. Such
+    # images must use the same background/polarity rules as RGB files.
+    has_alpha = img.convert("RGBA").getchannel("A").getextrema()[0] < 255
 colorful_logo = False
 plaque_logo = False
 if has_alpha:
@@ -91,15 +118,27 @@ if has_alpha:
         img = artwork
     bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
     img = Image.alpha_composite(bg, img)
-elif best_logo and img.mode in ("RGB", "P"):
+elif best_logo:
     colorful_logo = (
         ImageStat.Stat(img.convert("RGB").convert("HSV").getchannel("S")).mean[0] >= 45
     )
 
 img = img.convert("L")  # grayscale
-if (invert_dark and not has_alpha and not (best_logo and colorful_logo)
+if lcd_logo and not has_alpha:
+    border = (list(img.crop((0, 0, img.width, 1)).getdata())
+              + list(img.crop((0, img.height - 1, img.width, img.height)).getdata()))
+    border += [img.getpixel((x, y)) for x in (0, img.width - 1) for y in range(img.height)]
+    if sorted(border)[len(border) // 2] < 127:
+        img = ImageOps.invert(img)
+elif (invert_dark and not has_alpha and not (best_logo and colorful_logo)
         and ImageStat.Stat(img).mean[0] < 127):
     img = ImageOps.invert(img)
+if lcd_logo:
+    img = ImageOps.autocontrast(img)
+    threshold = logo_threshold(img)
+    bounds = img.point(lambda p: 255 if p < threshold else 0).getbbox()
+    if bounds:
+        img = img.crop(bounds)
 w, h = img.size
 source_aspect = w / h
 # Fit within max_width x max_height. Upscaling is opt-in so imported
@@ -129,7 +168,10 @@ if boost_wide and source_aspect > 5.5 and w == max_width and h < max_height:
 # now explicitly scopes imports to simple high-contrast graphics, not
 # photos, so this is the right default for what's actually supported.
 img = ImageOps.autocontrast(img)
-if best_logo:
+if lcd_logo:
+    threshold = logo_threshold(img)
+    img = img.point(lambda p: 255 if p >= threshold else 0).convert("1")
+elif best_logo:
     gray = img.convert("L")
     pixels = gray.tobytes()
     pixel_count = len(pixels)

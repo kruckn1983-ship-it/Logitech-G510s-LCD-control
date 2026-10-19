@@ -5,7 +5,6 @@ Aufruf: add-game-logo.py <appid> <bild.png>   (Logo setzen)
         add-game-logo.py <appid> --remove     (eigenes Logo entfernen)
 """
 import os
-import shutil
 import sys
 
 BASE = os.path.expanduser("~/.local/share/g510-lcd")
@@ -17,13 +16,18 @@ def main():
         return 1
     appid, arg = sys.argv[1], sys.argv[2]
     target = os.path.join(BASE, "custom_logos", f"{appid}.png")
+    marker = os.path.join(BASE, "custom_logos", f"{appid}.optimized")
     if arg == "--remove":
         if os.path.isfile(target):
             os.remove(target)
+        if os.path.isfile(marker):
+            os.remove(marker)
     else:
         from PIL import Image
         os.makedirs(os.path.dirname(target), exist_ok=True)
         Image.open(arg).save(target)
+        with open(marker, "w") as file:
+            file.write("1\n")
     # Der Dienst erzeugt das Logo beim naechsten Spielstart neu.
     for ext in ("bin", "size"):
         cached = os.path.join(BASE, "game_logos", f"{appid}.{ext}")

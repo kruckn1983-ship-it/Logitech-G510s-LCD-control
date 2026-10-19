@@ -107,6 +107,8 @@ def main():
                  if source == custom else
                  ["--trim-transparent", "--upscale", "--invert-dark",
                   "--boost-wide", "--best-logo"])
+        if source == own and os.path.isfile(os.path.splitext(own)[0] + ".optimized"):
+            flags += ["--lcd-logo"]
         size = run([CONVERTER, source, output, "160", "43"] + flags) \
             if source else []
         kind = "Logo"

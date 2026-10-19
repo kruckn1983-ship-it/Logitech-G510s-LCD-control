@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QInputDialog, QStatusBar, QListWidget, QListWidgetItem,
     QCheckBox, QSizePolicy, QShortcut,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QProcess
 from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QFontMetrics, QKeySequence
 import evdev
 from evdev import ecodes
@@ -2157,6 +2157,9 @@ class GameLogosTab(QWidget):
         self.logo_dir = DATA_DIR / "game_logos"
         self.custom_dir = DATA_DIR / "custom_logos"
         self.games = {}
+        self.logo_generator = QProcess(self)
+        self.logo_generator.finished.connect(self.on_logos_generated)
+        self.logo_generator.errorOccurred.connect(self.on_logo_generation_error)
 
         layout = QHBoxLayout(self)
         left = QVBoxLayout()
@@ -2181,22 +2184,31 @@ class GameLogosTab(QWidget):
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setStyleSheet("background:#c0d796;border:1px solid #555;")
         self.source_label = QLabel("")
+        self.optimize_logo = QCheckBox("Für LCD optimieren (160×43, Schwarz-Weiß)")
+        self.optimize_logo.setToolTip(
+            "Entfernt leere Ränder und passt Kontrast und Schwarz-Weiß-Schwelle an. "
+            "Ausschalten: bisherige Darstellung aus dem unveränderten Original.")
+        self.optimize_logo.toggled.connect(self.on_logo_optimization_changed)
         self.choose_btn = QPushButton("Eigenes Logo wählen...")
         self.choose_btn.clicked.connect(self.choose_logo)
         self.reset_btn = QPushButton("Zurück zum automatischen Logo")
         self.reset_btn.clicked.connect(self.reset_logo)
         hint = QLabel(
             "Wähle ein klares, kontrastreiches Bild (Weiß auf Dunkel wird automatisch "
-            "invertiert). Es wird zugeschnitten, auf das volle 160x43-Display skaliert "
-            "und zentriert. Das LCD verwendet es beim nächsten Start des Spiels.")
+            "invertiert). Neue Importe werden für das LCD optimiert: leere Ränder "
+            "entfernen, proportional einpassen und Schwarz-Weiß-Kontrast anpassen. "
+            "Der Schalter stellt die bisherige Darstellung wieder her; das Original "
+            "bleibt erhalten. Die Vorschau aktualisiert sich direkt nach dem Import. "
+            "Das LCD verwendet es beim nächsten Start des Spiels.")
         hint.setWordWrap(True)
         for w in (self.title_label, self.preview, self.source_label,
-                  self.choose_btn, self.reset_btn, hint):
+                  self.optimize_logo, self.choose_btn, self.reset_btn, hint):
             right.addWidget(w)
         right.addStretch(1)
         layout.addLayout(right, 2)
         self.choose_btn.setEnabled(False)
         self.reset_btn.setEnabled(False)
+        self.optimize_logo.setEnabled(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2205,13 +2217,27 @@ class GameLogosTab(QWidget):
         self.games = self.steam.games(libs)
         self.fill_list()
         # Creates the automatic logos that don't exist yet; skips the rest.
-        subprocess.Popen(
-            [sys.executable, str(PROJECT_DIR / "scripts" / "pregenerate-game-logos.py")],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.logo_generator.state() == QProcess.NotRunning:
+            self.logo_generator.start(
+                sys.executable, [str(PROJECT_DIR / "scripts" / "pregenerate-game-logos.py")])
 
-    def fill_list(self, *_):
+    def on_logos_generated(self, exit_code, exit_status):
+        error = bytes(self.logo_generator.readAllStandardError()).decode(errors="replace").strip()
+        self.logo_generator.readAllStandardOutput()
+        self.update_detail()
+        if exit_status != QProcess.NormalExit or exit_code != 0:
+            self.source_label.setText(
+                f"Automatische Logo-Erzeugung fehlgeschlagen: {error or f'Exit-Code {exit_code}'}")
+
+    def on_logo_generation_error(self, error):
+        if error == QProcess.FailedToStart:
+            self.source_label.setText(
+                f"Automatische Logo-Erzeugung konnte nicht gestartet werden: "
+                f"{self.logo_generator.errorString()}")
+
+    def fill_list(self, *_, selected_appid=None):
         needle = self.search.text().strip().lower()
-        current = self.current_appid()
+        current = self.current_appid() if selected_appid is None else selected_appid
         self.list.blockSignals(True)
         self.list.clear()
         for appid, name in sorted(self.games.items(), key=lambda g: g[1].lower()):
@@ -2241,6 +2267,8 @@ class GameLogosTab(QWidget):
             data = bin_file.read_bytes()
         except (OSError, ValueError):
             return None
+        if not (0 < w <= LCD_WIDTH and 0 < h <= LCD_HEIGHT):
+            return None
         row = (w + 7) // 8
         if len(data) < row * h:
             return None
@@ -2257,6 +2285,12 @@ class GameLogosTab(QWidget):
     def update_detail(self, *_):
         appid = self.current_appid()
         self.choose_btn.setEnabled(appid is not None)
+        has_custom = appid is not None and (self.custom_dir / f"{appid}.png").is_file()
+        self.optimize_logo.setEnabled(has_custom)
+        self.optimize_logo.blockSignals(True)
+        self.optimize_logo.setChecked(
+            has_custom and (self.custom_dir / f"{appid}.optimized").is_file())
+        self.optimize_logo.blockSignals(False)
         if appid is None:
             self.title_label.setText("Spiel auswählen")
             self.preview.clear()
@@ -2268,7 +2302,8 @@ class GameLogosTab(QWidget):
         shipped = (PROJECT_DIR / "assets" / "logos" / f"{appid}.png").is_file()
         self.reset_btn.setEnabled(has_custom)
         self.source_label.setText(
-            "Quelle: dein eigenes Logo" if has_custom else
+            ("Quelle: dein eigenes Logo · LCD-optimiert" if self.optimize_logo.isChecked()
+             else "Quelle: dein eigenes Logo · Original-Darstellung") if has_custom else
             "Quelle: im Projekt enthaltenes Logo" if shipped else
             "Quelle: automatisch (Steam-Artwork)")
         pix = self.render_bin(appid)
@@ -2277,28 +2312,46 @@ class GameLogosTab(QWidget):
         else:
             self.preview.setPixmap(QPixmap.fromImage(pix))
 
-    def convert(self, appid, custom):
+    def convert(self, appid, custom, optimized=None):
         """Regenerates the cached .bin/.size exactly like the service does."""
+        import tempfile
         self.logo_dir.mkdir(parents=True, exist_ok=True)
-        for ext in ("bin", "size"):
-            (self.logo_dir / f"{appid}.{ext}").unlink(missing_ok=True)
         converter = str(PROJECT_DIR / "src" / "png-to-lcd.py")
-        out = str(self.logo_dir / f"{appid}.bin")
         if custom:
-            cmd = [sys.executable, converter, str(custom), out, "160", "43",
-                   "--upscale", "--invert-dark"]
+            source = custom
+            flags = ["--upscale", "--invert-dark"]
+            if optimized is None:
+                optimized = (self.custom_dir / f"{appid}.optimized").is_file()
+            if optimized:
+                flags.append("--lcd-logo")
         else:
             shipped = PROJECT_DIR / "assets" / "logos" / f"{appid}.png"
             source = shipped if shipped.is_file() else self.steam.find_artwork(self.libs, appid)
-            if not source:
-                return
-            cmd = [sys.executable, converter, str(source), out, "160", "43", "--upscale"]
+            flags = ["--upscale"]
             if not shipped.is_file():
-                cmd += ["--trim-transparent", "--invert-dark", "--boost-wide", "--best-logo"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        size = result.stdout.split()
-        if result.returncode == 0 and len(size) >= 2:
-            (self.logo_dir / f"{appid}.size").write_text(f"{size[0]} {size[1]}\n")
+                flags += ["--trim-transparent", "--invert-dark", "--boost-wide", "--best-logo"]
+        with tempfile.TemporaryDirectory(prefix=".logo-", dir=self.logo_dir) as temporary:
+            output = Path(temporary) / f"{appid}.bin"
+            cmd = ([sys.executable, converter, str(source), str(output), "160", "43", *flags]
+                   if source else
+                   [sys.executable, str(PROJECT_DIR / "src" / "title-to-lcd.py"),
+                    self.games[appid], str(output)])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                raise ValueError(result.stderr.strip() or
+                                 f"Logo-Umwandlung fehlgeschlagen (Exit-Code {result.returncode}).")
+            try:
+                width, height = map(int, result.stdout.split())
+            except ValueError as error:
+                raise ValueError("Die Logo-Umwandlung lieferte keine gültige Bildgröße.") from error
+            if not (0 < width <= LCD_WIDTH and 0 < height <= LCD_HEIGHT):
+                raise ValueError("Das erzeugte Logo passt nicht auf das 160x43-Display.")
+            if output.stat().st_size != ((width + 7) // 8) * height:
+                raise ValueError("Die erzeugten Logo-Bilddaten sind unvollständig.")
+            size = Path(temporary) / f"{appid}.size"
+            size.write_text(f"{width} {height}\n")
+            output.replace(self.logo_dir / output.name)
+            size.replace(self.logo_dir / size.name)
 
     def choose_logo(self):
         appid = self.current_appid()
@@ -2309,23 +2362,54 @@ class GameLogosTab(QWidget):
             "Bilder (*.png *.jpg *.jpeg *.bmp *.gif *.webp)")
         if not path:
             return
-        self.custom_dir.mkdir(parents=True, exist_ok=True)
-        target = self.custom_dir / f"{appid}.png"
+        import tempfile
         try:
-            QImage(path).save(str(target), "PNG") or shutil.copyfile(path, target)
-        except OSError as exc:
-            QMessageBox.warning(self, "Logo", f"Das Logo konnte nicht gespeichert werden: {exc}")
+            image = QImage(path)
+            if image.isNull():
+                raise ValueError("Die gewählte Datei konnte nicht als Bild gelesen werden.")
+            self.custom_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".import-", dir=self.custom_dir) as temporary:
+                target = Path(temporary) / f"{appid}.png"
+                if not image.save(str(target), "PNG"):
+                    raise OSError("Das Bild konnte nicht im PNG-Format gespeichert werden.")
+                marker = Path(temporary) / f"{appid}.optimized"
+                marker.write_text("1\n")
+                self.convert(appid, target, optimized=True)
+                target.replace(self.custom_dir / target.name)
+                marker.replace(self.custom_dir / marker.name)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            QMessageBox.warning(self, "Logo-Import fehlgeschlagen", str(exc))
             return
-        self.convert(appid, target)
-        self.fill_list()
+        self.fill_list(selected_appid=appid)
+        self.source_label.setText("Quelle: dein eigenes Logo · LCD-optimiert · Import erfolgreich")
+
+    def on_logo_optimization_changed(self, enabled):
+        appid = self.current_appid()
+        if appid is None:
+            return
+        try:
+            self.convert(appid, self.custom_dir / f"{appid}.png", optimized=enabled)
+            marker = self.custom_dir / f"{appid}.optimized"
+            if enabled:
+                marker.write_text("1\n")
+            else:
+                marker.unlink(missing_ok=True)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            QMessageBox.warning(self, "Logo-Optimierung fehlgeschlagen", str(exc))
+        self.update_detail()
 
     def reset_logo(self):
         appid = self.current_appid()
         if appid is None:
             return
-        (self.custom_dir / f"{appid}.png").unlink(missing_ok=True)
-        self.convert(appid, None)
-        self.fill_list()
+        try:
+            self.convert(appid, None)
+            (self.custom_dir / f"{appid}.png").unlink(missing_ok=True)
+            (self.custom_dir / f"{appid}.optimized").unlink(missing_ok=True)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            QMessageBox.warning(self, "Logo zurücksetzen fehlgeschlagen", str(exc))
+            return
+        self.fill_list(selected_appid=appid)
 
 
 class OverviewTab(QWidget):
