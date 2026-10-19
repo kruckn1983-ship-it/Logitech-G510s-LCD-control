@@ -1,5 +1,5 @@
 #!/bin/bash
-# Full setup for the G510s LCD project on a fresh Manjaro/Arch install.
+# Full setup on Arch/Manjaro, Fedora/Nobara and Debian/Ubuntu/Mint.
 # Run this from inside the project folder: ./install.sh
 #
 # Installs every dependency this project needs, puts the system files
@@ -35,39 +35,8 @@ echo "=== 1/7: Systempakete (Arch/Manjaro, Fedora/Nobara, Debian/Ubuntu/Mint) ==
 echo "=== 2/7: G510s-Treiber (libg15 + libg15render aus mitgeliefertem Quellcode) ==="
 "$DIR/scripts/install-driver.sh"
 
-echo "=== 3/7: Convert the label fonts ==="
-# Both fonts ship in the repo (fonts/source-ttf/) -- this used to be a
-# manual step ("get your own copy of a commercial font, then run
-# g15fontconvert by hand"). Not anymore: both are bundled and this
-# converts them automatically every run (matches this file's own
-# "every step just overwrites" policy, and self-heals if a corrupted
-# .fnt ever triggers the runtime sanity-check fallback in
-# g510_lcd_stats.c -- see font_sanity.h).
-convert_font() {
-    # $1=source (.otf/.ttf)  $2=output (.fnt)  $3=description
-    if [ ! -f "$1" ]; then
-        echo "  [missing] $1 -- skipping conversion, $3 falls through to the next tier."
-    elif ! command -v g15fontconvert &>/dev/null; then
-        echo "  [missing] g15fontconvert (ships with the libg15render AUR package"
-        echo "  installed in step 2) -- skipping conversion."
-    else
-        echo "  Converting $1 -> $2"
-        g15fontconvert -s 8 -i "$1" -o "$2"
-    fi
-}
-convert_font "$DIR/fonts/source-ttf/FONT.otf" "$DIR/fonts/lcd-label-8.fnt" "the primary label font"
-convert_font "$DIR/fonts/source-ttf/FALLBACK.ttf" "$DIR/fonts/lcd-label-8-fallback.fnt" "the fallback label font"
-
-echo "=== 4/7: Compile the C programs ==="
-# g510_lcd_stats needs the same FreeType/TTF flags libg15render.so itself
-# was built with -- without them, g15canvas's struct layout mismatches
-# between this program and the library, corrupting stack memory (this
-# bit us once already while building v1.1; caught via AddressSanitizer).
-# -DPROJECT_DIR bakes in THIS checkout's absolute path so the binary
-# can find its own font/config files without any file in the repo
-# itself hardcoding a username or machine-specific location.
-gcc -I/usr/local/include $(pkg-config --cflags freetype2) -DPROJECT_DIR="\"$DIR\"" src/g510_lcd_stats.c -o src/g510_lcd_stats -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lg15render $(pkg-config --libs freetype2) -lm
-gcc src/g510_lcd_buttons.c -o src/g510_lcd_buttons
+echo "=== 3/7 + 4/7: Label fonts and C programs ==="
+bash "$DIR/scripts/build.sh" --fonts
 
 echo "=== 5/7: udev rules + hwdb (needs sudo) ==="
 # The backlight-restore-on-hotplug script needs a fixed system location

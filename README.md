@@ -41,26 +41,77 @@ Alle drei Dienste sollten `active (running)` anzeigen. Falls das LCD nicht sofor
 
 **Enthaltene Funktionen:**
 
+- Dunkle Oberfläche mit linker Navigation, Übersicht und Live-LCD-Vorschau; Einstellungen rechts neben dem LCD-Editor, Speichern und Status unten. Fenster frei vergrößerbar und maximierbar; **F11** oder **Vollbild** nutzt den ganzen Bildschirm, **Esc** verlässt Vollbild. Die LCD-Vorschau skaliert proportional, kleinere Fenster bieten bei Bedarf Scrollleisten.
 - Live-Anzeige von CPU, RAM, VRAM und Temperatur auf dem eingebauten LCD
+- Kompakte Systemvorlage mit 20 separat gemessenen CPU-Thread-Balken (i9-10850K: 10 Kerne/20 Threads), CPU-/GPU-Temperatur, GPU-/VRAM-Balken, RAM-Füllbalken, Uhrzeit und Netzwerk-Up-/Download. Eingerahmte Bereiche bleiben im Editor bearbeitbar.
 - Vollständige RGB-Steuerung der Tastaturbeleuchtung
 - G-Tasten-Makros mit den Profilen M1, M2 und M3
-- Editor für eigene Bildschirme: Sensoren, Bilder und Text auf L2–L5 platzieren; die Statistikseite von L1 übernimmt die L2-Belegung, die L1-Taste wechselt zusätzlich zur analogen Uhr
+- Editor für eigene Bildschirme: Auswahl per Dropdown; System, Media Center, Spiele und Netzwerk gestalten, zusätzliche Screens ohne feste Anzahl anlegen, umbenennen und löschen. Die eingebaute Uhr bleibt unveränderbar. L1 blättert durch die fünf vorhandenen und anschließend alle eigenen Bildschirme.
+- Uhr-Screen mit **20 fertigen Designs**: Digital pur (bisheriges Layout), Analog-/Digital-Kombinationen, Siebensegment, Binäruhr, Punktmatrix, Kalender und weitere Varianten. Im Uhr-Screen blättern **L2 zurück / L3 weiter** im Kreis; alternativ im Tool unter **Uhr-Design** auswählen. Die letzte Auswahl bleibt über Neustarts erhalten. Lokale Systemzeit, deutsche Datumsanzeige, keine zusätzlichen Schriftdateien.
+- Bildschirmabhängige Funktionstasten L2–L5: über die Navigation **LCD-Tasten** einstellbar. Media Center startet mit vorheriger Titel, nächster Titel, Play und Pause; Uhr mit vorherigem/nächstem Uhr-Layout; andere Screens zunächst unbelegt. Bereits gespeicherte Belegungen bleiben unverändert.
+- Netzwerkvorlage mit aktiver Schnittstelle, Download-/Uploadrate (KiB/s bzw. MiB/s), zwei getrennten Verlaufsgrafiken der letzten 60 Messwerte und lokaler IPv4-Adresse. Die Diagramme liegen mit Abstand rechts neben den Zahlen und sind im Editor verschiebbar und skalierbar. Kein Speedtest oder Internet-Verfügbarkeitstest. Kein separater Lüftersteuerungsbereich; BIOS-Regelung und LACT bleiben unabhängig.
 - Kleiner Winamp auf der Tastatur: animierte Equalizer-Balken sowie Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums
 - Fortschrittsbalken für Medien mit einer bekannten Laufzeit
-- Während der Wiedergabe wechselt das LCD automatisch zu L3 und danach zurück zum zuvor ausgewählten Bildschirm
+- Während der Wiedergabe wechselt das LCD automatisch zum Media Center bzw. zur Spieleansicht. Manuelle Auswahl per L1 oder Tool hat Vorrang bis mindestens fünf Sekunden ohne Wiedergabe; ohne manuelle Auswahl kehrt die Anzeige zur Systemübersicht zurück.
 - Läuft ohne Root-Rechte unter dem normalen Benutzerkonto, startet bei der Anmeldung und übersteht Neustarts
 
 ![G510s-Steuerungsanwendung – v1](docs/screenshots/g510s-control-v1.png)
 
 ## Audio-Visualisierung
 
-Platziere einen Visualizer auf einem der Bildschirme L2–L5. Das LCD zeigt dann einen kleinen Live-Equalizer mit zum Musiksignal ausschlagenden Balken sowie Titel, Interpret und Laufzeit.
+Platziere einen Visualizer auf einem bearbeitbaren Bildschirm. Das LCD zeigt dann einen kleinen Live-Equalizer mit zum Musiksignal ausschlagenden Balken sowie Titel, Interpret und Laufzeit.
 
 Der Visualizer greift nicht gezielt auf Spotify, den Browser oder eine bestimmte Anwendung zu. Stattdessen erfasst er den Ton, der gerade über die Lautsprecher ausgegeben wird. Dadurch funktioniert er gleichermaßen mit Spotify, YouTube im Browser, VLC, Spielen und anderen Anwendungen – ohne zusätzliche Konfiguration und ohne Synchronisationsprobleme mit der gerade aktiven Anwendung. Die Größe lässt sich wie bei jedem anderen Element ändern; zusätzlicher Platz zeigt mehr Balken statt nur größere Balken.
 
 ## Funktionsweise
 
 Die PyQt5-Anwendung `g510_app.py` kommuniziert direkt mit `/dev/g510-lcd` und `/dev/g510-keys`. Sie verwendet stabile symbolische Verknüpfungen statt unzuverlässiger Gerätenummern und ist nicht auf `g15daemon` angewiesen, dessen Tastenzuordnungen für dieses Modell falsch sind. Die Anwendung läuft unauffällig als drei systemd-Dienste des Benutzers.
+
+## Entwicklung und Modulstruktur
+
+Die Oberfläche und ihre LCD-Daten sind nach Aufgaben getrennt:
+
+| Modul | Aufgabe |
+| --- | --- |
+| [`src/g510_app.py`](src/g510_app.py) | Fenster, Seiten und Verbindung zu den Diensten |
+| [`src/g510_layouts.py`](src/g510_layouts.py) | Sensorbeschreibungen, LCD-Grenzen und Layoutvorlagen; ohne Qt und Dateizugriffe |
+| [`src/g510_layout_store.py`](src/g510_layout_store.py) | Lesen und Schreiben von Layouts und Spielepositionen mit explizit übergebenen Dateipfaden |
+| [`src/g510_screen_canvas.py`](src/g510_screen_canvas.py) | Skalierte LCD-Vorschau, Auswahl, Verschieben und Größenänderungen |
+| [`src/g510_preview.py`](src/g510_preview.py) | Aufruf des nativen Renderers und Lesen seiner Bild-/Positionsausgabe |
+| [`src/g510_theme.py`](src/g510_theme.py) | Gemeinsames dunkles Oberflächendesign |
+| [`src/g510_screen_keys.py`](src/g510_screen_keys.py) | Screenkatalog, Tastenaktionen und gespeicherte Uhr-Auswahl |
+| [`src/g510_lcd_stats.c`](src/g510_lcd_stats.c) | Sensorerfassung und LCD-Dienst |
+| [`src/clock_layouts.h`](src/clock_layouts.h) | Internes C-Uhrmodul mit den 20 Designs; vom Renderer eingebunden |
+
+Installer, Rebuild-Skript, Paketbau und CI verwenden denselben
+[`scripts/build.sh`](scripts/build.sh)-Einstiegspunkt:
+
+```sh
+# Nur bauen, ohne sudo, Treiberinstallation oder Dienstneustart:
+bash scripts/build.sh
+
+# Bei Bedarf auch die vorhandenen Schriftquellen neu konvertieren:
+bash scripts/build.sh --fonts
+
+# Getrenntes Ausgabeverzeichnis und eingebetteter Installationspfad:
+bash scripts/build.sh --output-dir /tmp/g510-build --project-dir /usr/lib/g510-lcd
+
+# Regressionstests ohne angeschlossene Tastatur:
+PYTHONDONTWRITEBYTECODE=1 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -q
+```
+
+Der Build benötigt GCC, `pkg-config`, FreeType und die installierten
+G15-Bibliotheken; die Tests zusätzlich PyQt5, Pillow und evdev.
+Beide Programme werden erst nach erfolgreichen Compilerläufen ersetzt.
+Compiler- und Abhängigkeitsfehler brechen den Build ab und lassen die bisherigen
+Programme unverändert. Das bestehende
+[`scripts/rebuild.sh`](scripts/rebuild.sh) baut zusätzlich die Schriften und
+startet danach die beiden LCD-Dienste neu. Ohne interaktive Eingabe wartet es
+nicht auf Enter; `G510_NONINTERACTIVE=1` unterdrückt die Pause auch im Terminal.
+
+Das Refactoring verändert weder Screen-IDs noch Layoutdateiformat,
+Tastenbelegungen oder das Verzeichnis der persönlichen Einstellungen.
+Die CI führt vor dem Erstellen des Installationsmediums auch die Regressionstests aus.
 
 ## Projektstatus
 

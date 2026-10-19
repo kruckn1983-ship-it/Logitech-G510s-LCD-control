@@ -3,8 +3,9 @@
 #include <string.h>
 #include <time.h>
 #include <linux/input.h>
-
-#define NUM_SCREENS 2
+#include <unistd.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 /* User-specific by nature -- built at runtime from $HOME rather than
    baked in at compile time, so this file doesn't hardcode a username. */
@@ -12,13 +13,6 @@ static const char *button_log_path(void) {
     static char path[256];
     const char *home = getenv("HOME");
     snprintf(path, sizeof(path), "%s/.local/share/g510lcd-buttons.log", home ? home : "/tmp");
-    return path;
-}
-
-static const char *screen_state_path(void) {
-    static char path[256];
-    const char *runtime = getenv("XDG_RUNTIME_DIR");
-    snprintf(path, sizeof(path), "%s/g510lcd_screen", runtime ? runtime : "/tmp");
     return path;
 }
 
@@ -33,20 +27,30 @@ static const char *key_name(int code) {
     }
 }
 
-static int read_screen(void) {
-    FILE *f = fopen(screen_state_path(), "r");
-    if (!f) return 0;
-    int s = 0;
-    fscanf(f, "%d", &s);
-    fclose(f);
-    return s;
-}
-
-static void write_screen(int s) {
-    FILE *f = fopen(screen_state_path(), "w");
-    if (!f) return;
-    fprintf(f, "%d", s);
-    fclose(f);
+static void handle_key(const char *key) {
+    char helper[4096];
+    ssize_t length = readlink("/proc/self/exe", helper, sizeof(helper) - 1);
+    if (length < 0) { perror("readlink LCD key helper"); return; }
+    helper[length] = 0;
+    char *slash = strrchr(helper, '/');
+    if (!slash || (size_t)(slash - helper) + sizeof("/g510_screen_keys.py") > sizeof(helper)) {
+        fprintf(stderr, "g510-lcd-buttons: invalid helper path\n");
+        return;
+    }
+    strcpy(slash, "/g510_screen_keys.py");
+    pid_t child = fork();
+    if (child < 0) { perror("fork LCD action"); return; }
+    if (child == 0) {
+        execlp("python3", "python3", helper, key, (char *)NULL);
+        perror("exec LCD action");
+        _exit(127);
+    }
+    int status;
+    pid_t result;
+    do { result = waitpid(child, &status, 0); } while (result < 0 && errno == EINTR);
+    if (result < 0) perror("wait LCD action");
+    else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        fprintf(stderr, "g510-lcd-buttons: action for %s failed (status %d)\n", key, status);
 }
 
 static void log_button(const char *name) {
@@ -70,6 +74,13 @@ static long ms_since(struct timespec *last) {
 int main(void) {
     FILE *f = fopen("/dev/g510-keys", "rb");
     if (!f) { perror("open /dev/g510-keys"); return 1; }
+    /* evdev is a live stream: buffered fread can wait for more events
+       after receiving a complete key press. */
+    if (setvbuf(f, NULL, _IONBF, 0) != 0) {
+        fprintf(stderr, "g510-lcd-buttons: cannot disable input buffering\n");
+        fclose(f);
+        return 1;
+    }
 
     /* These switches bounce (confirmed: single physical presses were
        logging 2-4 times). Track the last accepted press time per key
@@ -86,14 +97,11 @@ int main(void) {
         }
         clock_gettime(CLOCK_MONOTONIC, &last_press[ev.code]);
 
-        if (ev.code == 696) { /* L1: cycle stats/clock, or return to stats from a test screen */
-            int cur = read_screen();
-            write_screen(cur >= 2 ? 0 : (cur + 1) % NUM_SCREENS);
-        } else { /* L2-L5: show a test screen confirming the press, and log it */
-            write_screen(ev.code - 695); /* 697->2, 698->3, 699->4, 700->5 */
-            log_button(key_name(ev.code));
-        }
+        log_button(key_name(ev.code));
+        handle_key(key_name(ev.code));
     }
+    int failed = ferror(f);
+    if (failed) perror("read /dev/g510-keys");
     fclose(f);
-    return 0;
+    return failed ? 1 : 0;
 }

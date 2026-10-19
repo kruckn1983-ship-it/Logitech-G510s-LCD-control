@@ -35,9 +35,9 @@ apply here at all).
 """
 import sys
 from dataclasses import dataclass
-from PyQt5.QtCore import Qt, QRectF, QPointF, QSizeF, pyqtSignal
+from PyQt5.QtCore import Qt, QRectF, QPointF, QSizeF, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QPainterPath, QFont, QPen
-from PyQt5.QtWidgets import QWidget, QApplication
+from PyQt5.QtWidgets import QWidget, QApplication, QSizePolicy
 
 CELL_PX = 32
 GUTTER_PX = 4
@@ -268,7 +268,21 @@ class G510Canvas(QWidget):
         h = int(PADDING_PX * 2 + rows * (CELL_PX + GUTTER_PX))
         self._row_offset = -min_row
         self._col_offset = -min_col
-        self.setMinimumSize(w, h)
+        self._logical_size = QSize(w, h)
+        self.setMinimumSize(480, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def sizeHint(self):
+        return self._logical_size
+
+    def canvas_transform(self):
+        width, height = self._logical_size.width(), self._logical_size.height()
+        scale = min(self.width() / width, self.height() / height)
+        return scale, (self.width() - width * scale) / 2, (self.height() - height * scale) / 2
+
+    def canvas_position(self, position):
+        scale, left, top = self.canvas_transform()
+        return QPointF((position.x() - left) / scale, (position.y() - top) / scale)
 
     def _cell_rect(self, cell):
         x = PADDING_PX + (cell.col + self._col_offset) * (CELL_PX + GUTTER_PX)
@@ -291,6 +305,9 @@ class G510Canvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), BG_COLOR)
+        scale, left, top = self.canvas_transform()
+        painter.translate(left, top)
+        painter.scale(scale, scale)
         font = QFont()
         font.setPointSize(8)
         mkey_font = QFont()
@@ -374,13 +391,13 @@ class G510Canvas(QWidget):
         # this project gives that a cell does something, since nothing
         # else on the canvas visually says "button" the way a QPushButton
         # would have.
-        cell = self._cell_at(QPointF(event.pos()))
+        cell = self._cell_at(self.canvas_position(event.pos()))
         self.setCursor(Qt.PointingHandCursor if self._is_clickable(cell) else Qt.ArrowCursor)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-        cell = self._cell_at(QPointF(event.pos()))
+        cell = self._cell_at(self.canvas_position(event.pos()))
         if cell is None:
             return
         if cell.kind == "gkey":

@@ -25,6 +25,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <errno.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
 
 /* MEMORY LEAK FIX: in this TTF_SUPPORT build, g15r_initCanvas() calls
    FT_Init_FreeType(&canvas->ftLib) -- a whole FreeType library (~2.7KB,
@@ -507,6 +510,109 @@ static double get_uptime_hours(void) {
    globals -- calling the delta logic per-element would corrupt the deltas. */
 static double g_net_down_kbps = 0, g_net_up_kbps = 0;
 static char g_net_iface[64] = "";
+static char g_net_ipv4[INET_ADDRSTRLEN] = "N/V";
+static int g_net_rate_valid = 0;
+#define NET_HISTORY_SAMPLES 60
+typedef struct {
+    double down[NET_HISTORY_SAMPLES], up[NET_HISTORY_SAMPLES];
+    int count;
+} network_history_t;
+static network_history_t g_net_history;
+static double g_net_sampled_at = 0;
+
+static void append_network_history(void) {
+    if (g_net_history.count == NET_HISTORY_SAMPLES) {
+        memmove(g_net_history.down, g_net_history.down + 1,
+                (NET_HISTORY_SAMPLES - 1) * sizeof(double));
+        memmove(g_net_history.up, g_net_history.up + 1,
+                (NET_HISTORY_SAMPLES - 1) * sizeof(double));
+        g_net_history.count--;
+    }
+    int index = g_net_history.count++;
+    g_net_history.down[index] = g_net_down_kbps;
+    g_net_history.up[index] = g_net_up_kbps;
+}
+
+static void network_snapshot_path(char *path, size_t size, int temporary) {
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    snprintf(path, size, "%s/g510lcd_network%s", runtime ? runtime : "/tmp",
+             temporary ? ".tmp" : "");
+}
+
+/* The daemon owns the samples; one-shot GUI previews only read this snapshot. */
+static void publish_network_snapshot(void) {
+    char path[512], temporary[512];
+    network_snapshot_path(path, sizeof(path), 0);
+    network_snapshot_path(temporary, sizeof(temporary), 1);
+    FILE *file = fopen(temporary, "w");
+    if (!file) {
+        fprintf(stderr, "g510-lcd-stats: network snapshot: %s\n", strerror(errno));
+        return;
+    }
+    int ok = fprintf(file, "G510NET1 %.9f %s %d %d\n", g_net_sampled_at,
+                     g_net_iface[0] ? g_net_iface : "-", g_net_rate_valid,
+                     g_net_history.count) >= 0;
+    for (int i = 0; i < g_net_history.count && ok; i++)
+        ok = fprintf(file, "%.9f %.9f\n", g_net_history.down[i], g_net_history.up[i]) >= 0;
+    if (fclose(file) != 0) ok = 0;
+    if (ok && rename(temporary, path) == 0) return;
+    fprintf(stderr, "g510-lcd-stats: writing network snapshot failed: %s\n", strerror(errno));
+    unlink(temporary);
+}
+
+static int read_network_snapshot(void) {
+    char path[512], magic[16], iface[64];
+    network_snapshot_path(path, sizeof(path), 0);
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        if (errno != ENOENT)
+            fprintf(stderr, "g510-lcd-stats: reading network snapshot: %s\n", strerror(errno));
+        return 0;
+    }
+    double sampled_at;
+    int valid;
+    network_history_t history = {0};
+    int ok = fscanf(file, "%15s %lf %63s %d %d", magic, &sampled_at, iface,
+                    &valid, &history.count) == 5 &&
+             strcmp(magic, "G510NET1") == 0 && isfinite(sampled_at) &&
+             (valid == 0 || valid == 1) && history.count >= 0 &&
+             history.count <= NET_HISTORY_SAMPLES && valid == (history.count > 0);
+    for (int i = 0; ok && i < history.count; i++)
+        ok = fscanf(file, "%lf %lf", &history.down[i], &history.up[i]) == 2 &&
+             isfinite(history.down[i]) && isfinite(history.up[i]) &&
+             history.down[i] >= 0 && history.up[i] >= 0;
+    fclose(file);
+    if (!ok) {
+        fprintf(stderr, "g510-lcd-stats: invalid network snapshot\n");
+        return 0;
+    }
+    if (g_net_sampled_at < sampled_at || g_net_sampled_at - sampled_at > 10 ||
+        strcmp(iface, g_net_iface[0] ? g_net_iface : "-") != 0) return 0;
+    g_net_history = history;
+    g_net_rate_valid = valid;
+    g_net_down_kbps = valid ? history.down[history.count - 1] : 0;
+    g_net_up_kbps = valid ? history.up[history.count - 1] : 0;
+    return 1;
+}
+
+static void update_net_address(const char *iface) {
+    snprintf(g_net_ipv4, sizeof(g_net_ipv4), "N/V");
+    if (!iface[0]) return;
+    struct ifaddrs *addresses;
+    if (getifaddrs(&addresses) != 0) {
+        fprintf(stderr, "g510-lcd-stats: getifaddrs: %s\n", strerror(errno));
+        return;
+    }
+    for (struct ifaddrs *entry = addresses; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET ||
+            strcmp(entry->ifa_name, iface) != 0) continue;
+        const struct sockaddr_in *address = (const struct sockaddr_in *)entry->ifa_addr;
+        if (!inet_ntop(AF_INET, &address->sin_addr, g_net_ipv4, sizeof(g_net_ipv4)))
+            fprintf(stderr, "g510-lcd-stats: inet_ntop: %s\n", strerror(errno));
+        break;
+    }
+    freeifaddrs(addresses);
+}
 
 static int interface_is_up(const char *iface) {
     char path[256], state[32];
@@ -599,27 +705,43 @@ static int read_network_counters(const char *iface,
 
 static void update_net_speed(void) {
     static unsigned long long prev_rx = 0, prev_tx = 0;
-    static time_t prev_time = 0;
+    static struct timespec prev_time = {0};
+    static int previous_valid = 0;
     char iface[64] = "";
     unsigned long long rx = 0, tx = 0;
     int have_interface = choose_network_interface(iface, sizeof(iface));
     int have_counters = have_interface && read_network_counters(iface, &rx, &tx);
-    time_t now = time(NULL);
-    if (!have_counters || strcmp(iface, g_net_iface) != 0 ||
+    update_net_address(have_interface ? iface : "");
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        fprintf(stderr, "g510-lcd-stats: network clock: %s\n", strerror(errno));
+        g_net_rate_valid = 0;
+        g_net_history.count = 0;
+        previous_valid = 0;
+        return;
+    }
+    g_net_sampled_at = now.tv_sec + now.tv_nsec / 1000000000.0;
+    if (!have_counters || !previous_valid || strcmp(iface, g_net_iface) != 0 ||
         rx < prev_rx || tx < prev_tx) {
         g_net_down_kbps = 0;
         g_net_up_kbps = 0;
+        g_net_rate_valid = 0;
+        g_net_history.count = 0;
         prev_rx = rx;
         prev_tx = tx;
         prev_time = now;
+        previous_valid = have_counters;
         snprintf(g_net_iface, sizeof(g_net_iface), "%s",
-                 have_counters ? iface : "");
+                 have_interface ? iface : "");
         return;
     }
-    double dt = prev_time > 0 ? difftime(now, prev_time) : 0;
+    double dt = (now.tv_sec - prev_time.tv_sec) +
+                (now.tv_nsec - prev_time.tv_nsec) / 1000000000.0;
     if (dt > 0) {
         g_net_down_kbps = (rx - prev_rx) / 1024.0 / dt;
         g_net_up_kbps = (tx - prev_tx) / 1024.0 / dt;
+        g_net_rate_valid = 1;
+        append_network_history();
         prev_rx = rx;
         prev_tx = tx;
         prev_time = now;
@@ -902,18 +1024,29 @@ static int media_process_steam_appid(int pid, char *library, size_t library_size
     return found_steam_path ? -1 : 0;
 }
 
+static int media_stream_is_system_sound(const char *name, const char *role,
+                                        const char *event_id) {
+    return strcmp(role, "event") == 0
+        || strcmp(role, "notification") == 0
+        || strcmp(role, "animation") == 0
+        || event_id[0]
+        || strncmp(name, "desktop-", 8) == 0;
+}
+
 static void media_use_audio_stream(const char *name, const char *app_name,
+                                   const char *role, const char *event_id,
                                    int process_id, int corked,
                                    int *selected_stream, char *title,
                                    size_t title_size, char *artist,
                                    size_t artist_size) {
-    if (corked || (!name[0] && !app_name[0] && process_id <= 0)) return;
+    if (corked || media_stream_is_system_sound(name, role, event_id)
+            || (!name[0] && !app_name[0] && process_id <= 0)) return;
 
-    g_media_playing = 1;
     char library[512] = "";
     int steam_appid = media_process_steam_appid(process_id, library,
                                                  sizeof(library));
     if (steam_appid != 0) {
+        g_media_playing = 1;
         g_media_is_game = 1;
         if (steam_appid > 0) {
             g_media_game_appid = steam_appid;
@@ -928,7 +1061,11 @@ static void media_use_audio_stream(const char *name, const char *app_name,
 
     if (*selected_stream) return;
     *selected_stream = 1;
-    if (title[0]) return;
+    if (g_media_playing && title[0]) return;
+    *selected_stream = 2;
+    g_media_playing = 1;
+    title[0] = 0;
+    artist[0] = 0;
 
     if (!media_name_is_generic(name)) {
         char stream_title[256];
@@ -997,7 +1134,9 @@ static void update_media_info(void) {
     char title_buf[64] = "", artist_buf[48] = "", url_buf[512] = "";
     long pos_us = -1, len_us = -1;
     int title_playing = -1, title_is_plasma = 0;
-    int time_playing = -1, time_is_non_plasma = 0;
+    char raw_title[64] = "", raw_url[512] = "";
+    long raw_pos_us = -1, raw_len_us = -1;
+    int raw_playing = -1;
     char line[1024];
     while (fgets(line, sizeof(line), p)) {
         char *nl = strchr(line, '\n');
@@ -1024,6 +1163,8 @@ static void update_media_info(void) {
 
         int is_plasma = (strcmp(player, "plasma-browser-integration") == 0);
         int is_playing = (strcmp(status, "Playing") == 0);
+        if (!is_playing && strcmp(status, "Paused") != 0) continue;
+        if (media_stream_is_system_sound(title, "", "")) continue;
         if (is_playing) g_media_playing = 1;
 
         if (is_playing > title_playing ||
@@ -1037,16 +1178,27 @@ static void update_media_info(void) {
             url_buf[sizeof(url_buf) - 1] = 0;
             title_playing = is_playing;
             title_is_plasma = is_plasma;
+            pos_us = pos_str[0] ? atol(pos_str) : -1;
+            len_us = len_str[0] ? atol(len_str) : -1;
         }
-        if (is_playing > time_playing ||
-            (is_playing == time_playing && !is_plasma && !time_is_non_plasma)) {
-            pos_us = atol(pos_str);
-            len_us = atol(len_str);
-            time_playing = is_playing;
-            time_is_non_plasma = !is_plasma;
+        if (!is_plasma && is_playing > raw_playing) {
+            snprintf(raw_title, sizeof(raw_title), "%s", title);
+            strip_browser_tab_noise(raw_title);
+            snprintf(raw_url, sizeof(raw_url), "%s", url);
+            raw_pos_us = pos_str[0] ? atol(pos_str) : -1;
+            raw_len_us = len_str[0] ? atol(len_str) : -1;
+            raw_playing = is_playing;
         }
     }
     pclose(p);
+
+    /* Borrow browser timing only when both exports describe the same media. */
+    if (title_is_plasma && raw_playing == title_playing
+            && ((url_buf[0] && strcmp(url_buf, raw_url) == 0)
+                || (title_buf[0] && strcmp(title_buf, raw_title) == 0))) {
+        pos_us = raw_pos_us;
+        len_us = raw_len_us;
+    }
 
     if (!title_buf[0] && url_buf[0])
         media_title_from_url(url_buf, title_buf, sizeof(title_buf));
@@ -1056,16 +1208,18 @@ static void update_media_info(void) {
     FILE *pa = popen("LC_ALL=C pactl list sink-inputs 2>/dev/null", "r");
     if (pa) {
         char pl[512], name[256] = "";
-        char app_name[128] = "";
+        char app_name[128] = "", role[64] = "", event_id[128] = "";
         int process_id = 0, corked = 0, selected_stream = 0;
         while (fgets(pl, sizeof(pl), pa)) {
             if (strncmp(pl, "Sink Input", 10) == 0) {
-                media_use_audio_stream(name, app_name, process_id, corked,
+                media_use_audio_stream(name, app_name, role, event_id, process_id, corked,
                                        &selected_stream, title_buf,
                                        sizeof(title_buf), artist_buf,
                                        sizeof(artist_buf));
                 name[0] = 0;
                 app_name[0] = 0;
+                role[0] = 0;
+                event_id[0] = 0;
                 process_id = 0;
                 corked = 0;
             } else if (strstr(pl, "Corked: yes")) {
@@ -1082,16 +1236,27 @@ static void update_media_info(void) {
                     char *q = strrchr(m, '"');
                     if (q) *q = 0;
                     snprintf(app_name, sizeof(app_name), "%s", m);
+                } else if ((m = strstr(pl, "media.role = \""))) {
+                    m += strlen("media.role = \"");
+                    char *q = strrchr(m, '"');
+                    if (q) *q = 0;
+                    snprintf(role, sizeof(role), "%s", m);
+                } else if ((m = strstr(pl, "event.id = \""))) {
+                    m += strlen("event.id = \"");
+                    char *q = strrchr(m, '"');
+                    if (q) *q = 0;
+                    snprintf(event_id, sizeof(event_id), "%s", m);
                 } else if ((m = strstr(pl, "application.process.id = \""))) {
                     process_id = atoi(m + strlen("application.process.id = \""));
                 }
             }
         }
-        media_use_audio_stream(name, app_name, process_id, corked,
+        media_use_audio_stream(name, app_name, role, event_id, process_id, corked,
                                &selected_stream, title_buf,
                                sizeof(title_buf), artist_buf,
                                sizeof(artist_buf));
         pclose(pa);
+        if (selected_stream == 2) pos_us = len_us = -1;
     }
 
     if (g_media_is_game) {
@@ -1101,7 +1266,8 @@ static void update_media_info(void) {
     }
     strncpy(g_media_title, title_buf, sizeof(g_media_title) - 1);
     strncpy(g_media_artist, artist_buf, sizeof(g_media_artist) - 1);
-    if (time_playing >= 0 && pos_us >= 0 && len_us >= 0) {
+    if (!g_media_is_game && title_playing == g_media_playing
+            && title_playing >= 0 && pos_us >= 0 && len_us >= 0) {
         int pos_s = (int)(pos_us / 1000000);
         int len_s = (int)(len_us / 1000000);
         /* Real bug, direct report: on a YouTube "premiere" (a live
@@ -1146,8 +1312,8 @@ static void update_media_info(void) {
 }
 
 static void format_kbps(double kbps, char *out, size_t outlen) {
-    if (kbps > 1024.0) snprintf(out, outlen, "%.1fM", kbps / 1024.0);
-    else snprintf(out, outlen, "%.0fK", kbps);
+    if (kbps >= 1024.0) snprintf(out, outlen, "%.1f MiB/s", kbps / 1024.0);
+    else snprintf(out, outlen, "%.0f KiB/s", kbps);
 }
 
 /* --- layout --- */
@@ -1557,19 +1723,27 @@ static void update_media_screen_selection(void) {
     static time_t stopped_since = 0;
     int screen = read_screen();
     int target_screen = g_media_is_game ? GAME_SCREEN : MUSIC_SCREEN;
+    char manual_path[512];
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    snprintf(manual_path, sizeof(manual_path), "%s/g510lcd_manual_screen",
+             runtime ? runtime : "/tmp");
+    int manual_selection = access(manual_path, F_OK) == 0;
+    if (manual_selection) media_screen_dismissed = 1;
 
     if (!g_media_playing) {
         /* Ignore short gaps (track changes); after a few seconds without
            playback, return from the media/game screen to the default. */
         time_t now = time(NULL);
         if (!stopped_since) stopped_since = now;
-        if (playback_active && now - stopped_since >= 5) {
-            if (!media_screen_dismissed
+        if (now - stopped_since >= 5) {
+            if (playback_active && !media_screen_dismissed
                     && (screen == MUSIC_SCREEN || screen == GAME_SCREEN)
                     && write_screen(0))
                 screen = 0;
             playback_active = 0;
             media_screen_dismissed = 0;
+            if (manual_selection && unlink(manual_path) != 0 && errno != ENOENT)
+                perror("g510-lcd-stats: clear manual screen override");
         }
         last_screen = screen;
         return;
@@ -1578,7 +1752,7 @@ static void update_media_screen_selection(void) {
 
     if (!playback_active) {
         playback_active = 1;
-        media_screen_dismissed = 0;
+        media_screen_dismissed = manual_selection;
     } else {
         if (!media_screen_dismissed && screen != last_screen
                 && screen != target_screen)
@@ -1590,8 +1764,7 @@ static void update_media_screen_selection(void) {
     last_screen = screen;
 }
 
-/* L1's default stats slot mirrors L2's configured layout. L1's button
-   still switches to the separate built-in clock screen. */
+/* Legacy screen 0 remains an alias for the System layout (screen 2). */
 static int max_temp_seen = 0; /* highest temp observed since this program started */
 
 static void draw_custom_screen(g15canvas *c, int screen_num);
@@ -1600,147 +1773,9 @@ static void draw_stats_screen(g15canvas *canvas) {
     draw_custom_screen(canvas, 2);
 }
 
-/* Screen 1: a simple large clock. New screens go here -- L1 cycles
-   through however many screens NUM_SCREENS (in g510_lcd_buttons.c)
-   currently accounts for. */
-/* Square-ish frame with rounded corners (g15r_drawRoundBox, not a
-   plain pixelBox) -- direct refinement request: "the clock is too
-   rough, i want rounded corners a bit". Position/size still grounded
-   in the real measured empty space (rendered --preview, scanned pixel
-   data: text ends at x=92, so x1=107 leaves a real 15px gap, not
-   guessed) but grown from the first pass's 36x36 to 40x40 -- fitting
-   3-character roman numerals (XII/III measured at 11px wide) AND
-   clearly-separated hands needed more room than the original size
-   had, confirmed by the numeral-position math below actually working
-   out with real margins, not by eyeballing it. */
-#define CLOCK_FACE_X1 107
-#define CLOCK_FACE_Y1 1
-#define CLOCK_FACE_X2 147
-#define CLOCK_FACE_Y2 41
-#define CLOCK_FACE_CX ((CLOCK_FACE_X1 + CLOCK_FACE_X2) / 2)
-#define CLOCK_FACE_CY ((CLOCK_FACE_Y1 + CLOCK_FACE_Y2) / 2)
+#include "clock_layouts.h"
 
-/* Hand-drawn I/V/X strokes -- direct refinement request: "could we do
-   the roman numerals JUST A BIT SMALLER?". G15_TEXT_SMALL (used for
-   the first pass) is already the smallest built-in bitmap font this
-   library ships (confirmed: only SMALL/MED/LARGE/HUGE exist, checked
-   the header) -- there's no smaller size to ask it for. Roman
-   numerals only ever need three shapes (I/V/X), each a trivial
-   straight-line composition, so drawing them directly with
-   g15r_drawLine at a chosen size is both smaller AND crisper on a
-   1-bit display than shrinking a bitmap or antialiased TTF glyph
-   would be (no half-lit pixels to go muddy at tiny sizes). */
-#define ROMAN_GLYPH_H 4
-
-static int roman_glyph_width(char ch) {
-    return (ch == 'I') ? 1 : 3;
-}
-
-static void draw_roman_glyph(g15canvas *c, char ch, int x, int y) {
-    switch (ch) {
-        case 'I':
-            g15r_drawLine(c, x, y, x, y + ROMAN_GLYPH_H - 1, G15_COLOR_BLACK);
-            break;
-        case 'V':
-            g15r_drawLine(c, x, y, x + 1, y + ROMAN_GLYPH_H - 1, G15_COLOR_BLACK);
-            g15r_drawLine(c, x + 2, y, x + 1, y + ROMAN_GLYPH_H - 1, G15_COLOR_BLACK);
-            break;
-        case 'X':
-            g15r_drawLine(c, x, y, x + 2, y + ROMAN_GLYPH_H - 1, G15_COLOR_BLACK);
-            g15r_drawLine(c, x + 2, y, x, y + ROMAN_GLYPH_H - 1, G15_COLOR_BLACK);
-            break;
-    }
-}
-
-/* cx/cy = the numeral's own center point (same 12px-radius circle
-   used before) -- computes the real composed width from the actual
-   glyphs being drawn (1px gap between characters) so it's centered
-   exactly, not approximated. */
-static void draw_roman_numeral(g15canvas *c, const char *s, int cx, int cy) {
-    int len = (int)strlen(s);
-    int w = 0;
-    for (int i = 0; i < len; i++) {
-        w += roman_glyph_width(s[i]);
-        if (i < len - 1) w += 1;
-    }
-    int x = cx - w / 2;
-    int y = cy - ROMAN_GLYPH_H / 2;
-    for (int i = 0; i < len; i++) {
-        draw_roman_glyph(c, s[i], x, y);
-        x += roman_glyph_width(s[i]) + 1;
-    }
-}
-
-static void draw_analog_clock(g15canvas *c, struct tm *t) {
-    g15r_drawRoundBox(c, CLOCK_FACE_X1, CLOCK_FACE_Y1, CLOCK_FACE_X2, CLOCK_FACE_Y2, 0, G15_COLOR_BLACK);
-
-    /* Roman numerals at 12/3/6/9 -- direct request: "some roman
-       numerals at 12 3 6 9 oclock", later refined ("JUST A BIT
-       SMALLER") to these hand-drawn I/V/X strokes -- see
-       draw_roman_numeral above. Each numeral is centered on its own
-       point on the same 12px-radius circle used since the first pass. */
-    draw_roman_numeral(c, "XII", CLOCK_FACE_CX, CLOCK_FACE_CY - 12);
-    draw_roman_numeral(c, "III", CLOCK_FACE_CX + 12, CLOCK_FACE_CY);
-    draw_roman_numeral(c, "VI",  CLOCK_FACE_CX, CLOCK_FACE_CY + 12);
-    draw_roman_numeral(c, "IX",  CLOCK_FACE_CX - 12, CLOCK_FACE_CY);
-
-    /* Small tick marks at the other 8 hours -- direct request: "with
-       small lines in between". Same angle convention as the hands
-       (0 = 12 o'clock, clockwise), radius 15-18 -- inside the rounded
-       frame (half-side 20) but clear of the numeral zone (numeral
-       centers sit at radius 12, half-height ~2.5, so nothing there
-       extends past radius ~15). Skips hours 12/3/6/9 -- already
-       labeled with numerals, a tick there would just clutter them. */
-    for (int hour = 1; hour <= 12; hour++) {
-        if (hour == 12 || hour == 3 || hour == 6 || hour == 9) continue;
-        double angle = (hour / 12.0) * 2 * M_PI;
-        int x1 = CLOCK_FACE_CX + (int)round(sin(angle) * 15);
-        int y1 = CLOCK_FACE_CY - (int)round(cos(angle) * 15);
-        int x2 = CLOCK_FACE_CX + (int)round(sin(angle) * 18);
-        int y2 = CLOCK_FACE_CY - (int)round(cos(angle) * 18);
-        g15r_drawLine(c, x1, y1, x2, y2, G15_COLOR_BLACK);
-    }
-
-    /* Hands -- lengths kept clearly under the numeral radius (12) so
-       neither hand ever visually overlaps a numeral, including at
-       :15/:45 (minute hand pointing exactly at III/IX) or 3:00/9:00
-       (hour hand pointing exactly at III/IX). No second hand --
-       deliberately simple on a square this small. */
-    double minute_angle = (t->tm_min / 60.0) * 2 * M_PI;
-    double hour_angle = ((t->tm_hour % 12) + t->tm_min / 60.0) / 12.0 * 2 * M_PI;
-
-    int minute_len = 9, hour_len = 6;
-    int mx = CLOCK_FACE_CX + (int)round(sin(minute_angle) * minute_len);
-    int my = CLOCK_FACE_CY - (int)round(cos(minute_angle) * minute_len);
-    int hx = CLOCK_FACE_CX + (int)round(sin(hour_angle) * hour_len);
-    int hy = CLOCK_FACE_CY - (int)round(cos(hour_angle) * hour_len);
-
-    g15r_drawLine(c, CLOCK_FACE_CX, CLOCK_FACE_CY, mx, my, G15_COLOR_BLACK);
-    g15r_drawLine(c, CLOCK_FACE_CX, CLOCK_FACE_CY, hx, hy, G15_COLOR_BLACK);
-    g15r_drawCircle(c, CLOCK_FACE_CX, CLOCK_FACE_CY, 1, 1, G15_COLOR_BLACK);
-}
-
-static void draw_clock_screen(g15canvas *c) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char time_str[16], date_str[32];
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", t);
-    strftime(date_str, sizeof(date_str), "%A, %d %B", t);
-
-    /* Direct request: "move the digital clock a bit down and the date
-       a bit up so theyre not so far away from eachother". Measured the
-       real gap first (rendered --preview, scanned lit pixel rows in
-       the left/digital-clock column): time occupied rows 8-14, date
-       rows 30-35, a 15px empty gap between them (rows 15-29). Moved
-       each 4px toward the other -- time to y=12 (rows 12-18), date to
-       y=26 (rows 26-31) -- shrinking the gap to 7px while staying well
-       clear of the screen edges (top/bottom) and each other. */
-    g15r_G15FPrint(c, time_str, 20, 12, G15_TEXT_LARGE, G15_JUSTIFY_LEFT, G15_COLOR_BLACK, 0);
-    g15r_renderString(c, (unsigned char*)date_str, 0, G15_TEXT_SMALL, 10, 26);
-    draw_analog_clock(c, t);
-}
-
-/* --- Custom Screens (v1.1): user-built dashboards for L2-L5 --- */
+/* --- Custom Screens (v1.1): user-built dashboards --- */
 
 typedef struct {
     const char *key;    /* used in custom_screens.txt and the GUI dropdown */
@@ -1781,6 +1816,8 @@ static const sensor_def_t SENSORS[] = {
     {"UPTIME", "UPTM", 0, 0, 0},
     {"NET_DOWN", "DN", 0, 0, 0},
     {"NET_UP", "UP", 0, 0, 0},
+    {"NET_CONNECTION", "", 0, 0, 0},
+    {"NET_IPV4", "IP:", 0, 0, 0},
     /* Direct request: "when selected, i dont want them to say time:
        xx:xx or date : xxxx / drop the lables" -- an empty label is
        safe here without any new code path: label_text_width("") is 0
@@ -1804,20 +1841,17 @@ static const sensor_def_t SENSORS[] = {
     {"MB_TEMP6", "MB6", 0, 1, 0},
 };
 
-#define CPU_CORE_SENSOR_COUNT 8
+#define CPU_CORE_SENSOR_COUNT 20
 static sensor_def_t cpu_core_sensors[CPU_CORE_SENSOR_COUNT];
 static char cpu_core_keys[CPU_CORE_SENSOR_COUNT][16];
 static char cpu_core_labels[CPU_CORE_SENSOR_COUNT][8];
 static int cpu_core_sensors_ready = 0;
-static const char *cpu_core_label_names[CPU_CORE_SENSOR_COUNT] = {
-    "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"
-};
 
 static void init_cpu_core_sensors(void) {
     if (cpu_core_sensors_ready) return;
     for (int i = 0; i < CPU_CORE_SENSOR_COUNT; i++) {
         snprintf(cpu_core_keys[i], sizeof(cpu_core_keys[i]), "CPU_CORE_%d", i);
-        snprintf(cpu_core_labels[i], sizeof(cpu_core_labels[i]), "%s", cpu_core_label_names[i]);
+        snprintf(cpu_core_labels[i], sizeof(cpu_core_labels[i]), "C%d", i + 1);
         cpu_core_sensors[i] = (sensor_def_t){cpu_core_keys[i], cpu_core_labels[i], 1, 0, 0};
     }
     cpu_core_sensors_ready = 1;
@@ -1832,51 +1866,48 @@ static const sensor_def_t *find_sensor(const char *key) {
     return NULL;
 }
 
-static double get_cpu_core_percent(int core) {
+static double cpu_core_percent[CPU_CORE_SENSOR_COUNT];
+static int cpu_core_valid[CPU_CORE_SENSOR_COUNT];
+
+static void update_cpu_core_percent(void) {
     static unsigned long long previous_total[CPU_CORE_SENSOR_COUNT];
     static unsigned long long previous_idle[CPU_CORE_SENSOR_COUNT];
     static int initialized[CPU_CORE_SENSOR_COUNT];
-    if (core < 0 || core >= CPU_CORE_SENSOR_COUNT) return 0.0;
-
     FILE *f = fopen("/proc/stat", "r");
-    if (!f) return 0.0;
-    char line[256];
-    char expected[16];
-    snprintf(expected, sizeof(expected), "cpu%d", core);
-    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
-    int found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        char name[16];
-        if (sscanf(line, "%15s %llu %llu %llu %llu %llu %llu %llu %llu",
-                   name, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) == 9 &&
-            strcmp(name, expected) == 0) {
-            found = 1;
-            break;
-        }
+    memset(cpu_core_valid, 0, sizeof(cpu_core_valid));
+    if (!f) {
+        fprintf(stderr, "g510-lcd-stats: cannot read CPU thread counters: %s\n", strerror(errno));
+        memset(initialized, 0, sizeof(initialized));
+        return;
     }
-    fclose(f);
-    if (!found) return 0.0;
-
-    unsigned long long total = user + nice + system + idle + iowait + irq + softirq + steal;
-    unsigned long long idle_total = idle + iowait;
-    if (!initialized[core]) {
+    char line[256];
+    int seen[CPU_CORE_SENSOR_COUNT] = {0};
+    while (fgets(line, sizeof(line), f)) {
+        int core;
+        unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+        if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &core, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) != 9 ||
+            core < 0 || core >= CPU_CORE_SENSOR_COUNT) continue;
+        seen[core] = 1;
+        unsigned long long total = user + nice + system + idle + iowait + irq + softirq + steal;
+        unsigned long long idle_total = idle + iowait;
+        cpu_core_percent[core] = 0;
+        if (initialized[core] && total > previous_total[core] &&
+            idle_total >= previous_idle[core]) {
+            unsigned long long delta_total = total - previous_total[core];
+            unsigned long long delta_idle = idle_total - previous_idle[core];
+            if (delta_idle <= delta_total) {
+                cpu_core_percent[core] = 100.0 * (delta_total - delta_idle) / delta_total;
+                cpu_core_valid[core] = 1;
+            }
+        }
         previous_total[core] = total;
         previous_idle[core] = idle_total;
         initialized[core] = 1;
-        return 0.0;
     }
-    if (total < previous_total[core] || idle_total < previous_idle[core]) {
-        previous_total[core] = total;
-        previous_idle[core] = idle_total;
-        return 0.0;
-    }
-    unsigned long long delta_total = total - previous_total[core];
-    unsigned long long delta_idle = idle_total - previous_idle[core];
-    previous_total[core] = total;
-    previous_idle[core] = idle_total;
-    return delta_total > 0 && delta_idle <= delta_total
-        ? 100.0 * (double)(delta_total - delta_idle) / (double)delta_total
-        : 0.0;
+    fclose(f);
+    for (int core = 0; core < CPU_CORE_SENSOR_COUNT; core++)
+        if (!seen[core]) initialized[core] = 0;
 }
 
 /* Fills pct_for_bar (0-100, or -1 if this sensor has no honest bar scale /
@@ -1894,9 +1925,11 @@ static void get_sensor_value(const char *key, const char *format,
         char *end = NULL;
         long core = strtol(key + 9, &end, 10);
         if (end && *end == '\0' && core >= 0 && core < CPU_CORE_SENSOR_COUNT) {
-            double v = get_cpu_core_percent((int)core);
-            *pct_for_bar = v;
-            snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+            if (cpu_core_valid[core]) {
+                double v = cpu_core_percent[core];
+                *pct_for_bar = v;
+                snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+            } else snprintf(disp, displen, "N/V");
         }
     } else if (strcmp(key, "CPU_GHZ") == 0) {
         snprintf(disp, displen, "%.1fGHz", get_cpu_ghz());
@@ -1966,10 +1999,22 @@ static void get_sensor_value(const char *key, const char *format,
         else { *pct_for_bar = v; snprintf(disp, displen, "%d%%", (int)(v + 0.5)); }
     } else if (strcmp(key, "UPTIME") == 0) {
         snprintf(disp, displen, "%.0fh", get_uptime_hours());
-    } else if (strcmp(key, "NET_DOWN") == 0) {
-        format_kbps(g_net_down_kbps, disp, displen);
-    } else if (strcmp(key, "NET_UP") == 0) {
-        format_kbps(g_net_up_kbps, disp, displen);
+    } else if (strcmp(key, "NET_DOWN") == 0 || strcmp(key, "NET_UP") == 0) {
+        double rate = strcmp(key, "NET_UP") == 0 ? g_net_up_kbps : g_net_down_kbps;
+        if (g_net_rate_valid && strcmp(format, "compact") == 0) {
+            const char *units[] = {"B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"};
+            double value = rate * 1024;
+            int unit = 0;
+            while (value >= 1024 && unit < 4) { value /= 1024; unit++; }
+            snprintf(disp, displen, value > 0 && value < 1000 && unit > 0 ? "%.1f%s" : "%.0f%s",
+                     value, units[unit]);
+        } else if (g_net_rate_valid) format_kbps(rate, disp, displen);
+        else snprintf(disp, displen, "N/V");
+    } else if (strcmp(key, "NET_CONNECTION") == 0) {
+        snprintf(disp, displen, g_net_iface[0] ? "LINK: %s" : "KEINE VERBINDUNG",
+                 g_net_iface);
+    } else if (strcmp(key, "NET_IPV4") == 0) {
+        snprintf(disp, displen, "%s", g_net_ipv4);
     } else if (strcmp(key, "TIME") == 0) {
         time_t now = time(NULL);
         const char *pattern = "%H:%M:%S";
@@ -2000,9 +2045,8 @@ static void get_sensor_value(const char *key, const char *format,
     }
 }
 
-#define MAX_ELEMENTS 16
+#define MAX_ELEMENTS 32
 #define MAX_IMAGES 2 /* the screen is 160x43 -- rarely useful to fit more than this */
-#define MAX_CUSTOM_SCREENS 4 /* L2, L3, L4, L5 */
 
 typedef struct {
     char sensor[24];
@@ -2014,6 +2058,8 @@ typedef struct {
     int width; /* bar length in px, only meaningful for style="bar" -- ignored for "number" */
     int height; /* vertical bar length in px */
     int font_size; /* G15_TEXT_SMALL(0)/MED(1)/LARGE(2)/HUGE(3) for label and value */
+    int max_width; /* optional total text budget, 0 preserves legacy full-width layout */
+    int hide_label;
 } element_t;
 
 /* A converted-to-1bpp image placed on a custom screen -- see
@@ -2058,6 +2104,11 @@ typedef struct {
     int font_size; /* G15_TEXT_SMALL(0)/MED(1)/LARGE(2)/HUGE(3) */
 } text_t;
 
+#define MAX_FRAMES 8
+typedef struct {
+    int x, y, width, height;
+} frame_t;
+
 /* Real-time audio bar visualizer -- direct request: "add ... a little
    visualizer" alongside media info, later refined with a reference
    image ("this is how the visualizer needs to look like") showing a
@@ -2078,11 +2129,14 @@ typedef struct {
     int image_count;
     text_t texts[MAX_TEXTS];
     int text_count;
+    frame_t frames[MAX_FRAMES];
+    int frame_count;
     visualizer_t visualizers[MAX_VISUALIZERS];
     int visualizer_count;
 } custom_screen_t;
 
-static custom_screen_t custom_screens[MAX_CUSTOM_SCREENS];
+/* Only the displayed layout is needed, independent of the number of screens. */
+static custom_screen_t current_custom_screen;
 static int g_preview_editor_mode = 0;
 
 static void decode_config_value(const char *src, char *dst, size_t dst_size) {
@@ -2109,7 +2163,7 @@ static void decode_config_value(const char *src, char *dst, size_t dst_size) {
 /* Reloaded every time a custom screen is drawn (cheap, small file) so
    edits made live in the GUI show up on the next frame without needing
    the daemon restarted. */
-static void load_custom_screens(void) {
+static void load_custom_screen(int screen) {
     /* Real bug found while adding font-size support to this function:
        text_count was never reset here, unlike count and image_count.
        Harmless for the one-shot --preview mode (a fresh process always
@@ -2123,12 +2177,7 @@ static void load_custom_screens(void) {
        but would have shown as ghost/duplicate text on the real keyboard
        the moment text elements were actually used without a service
        restart in between. */
-    for (int i = 0; i < MAX_CUSTOM_SCREENS; i++) {
-        custom_screens[i].count = 0;
-        custom_screens[i].image_count = 0;
-        custom_screens[i].text_count = 0;
-        custom_screens[i].visualizer_count = 0;
-    }
+    memset(&current_custom_screen, 0, sizeof(current_custom_screen));
     FILE *f = fopen(custom_screens_path(), "r");
     if (!f) return;
     char line[256];
@@ -2137,10 +2186,30 @@ static void load_custom_screens(void) {
         char *nl = strchr(line, '\n');
         if (nl) *nl = 0;
         if (strncmp(line, "SCREEN L", 8) == 0) {
-            int n = atoi(line + 8);
-            current = (n >= 2 && n <= 5) ? n - 2 : -1;
+            char *end;
+            errno = 0;
+            long n = strtol(line + 8, &end, 10);
+            current = (!errno && *end == 0 && n >= 2 && n == screen) ? 0 : -1;
+        } else if (strncmp(line, "FRAME ", 6) == 0 && current >= 0) {
+            custom_screen_t *cs = &current_custom_screen;
+            if (cs->frame_count >= MAX_FRAMES) continue;
+            frame_t frame = {0};
+            char *tok = strtok(line + 6, " ");
+            while (tok) {
+                char key[32]; int value;
+                if (sscanf(tok, "%31[^=]=%d", key, &value) == 2) {
+                    if (!strcmp(key, "x")) frame.x = value;
+                    else if (!strcmp(key, "y")) frame.y = value;
+                    else if (!strcmp(key, "width")) frame.width = value;
+                    else if (!strcmp(key, "height")) frame.height = value;
+                }
+                tok = strtok(NULL, " ");
+            }
+            if (frame.x >= 0 && frame.y >= 0 && frame.width >= 2 && frame.height >= 2 &&
+                frame.width <= G15_LCD_WIDTH - frame.x && frame.height <= G15_LCD_HEIGHT - frame.y)
+                cs->frames[cs->frame_count++] = frame;
         } else if (strncmp(line, "ELEMENT ", 8) == 0 && current >= 0) {
-            custom_screen_t *cs = &custom_screens[current];
+            custom_screen_t *cs = &current_custom_screen;
             if (cs->count >= MAX_ELEMENTS) continue;
             element_t *el = &cs->elements[cs->count];
             el->sensor[0] = 0; el->style[0] = 0;
@@ -2175,6 +2244,8 @@ static void load_custom_screens(void) {
                     else if (strcmp(key, "x") == 0) el->x = atoi(val);
                     else if (strcmp(key, "y") == 0) el->y = atoi(val);
                     else if (strcmp(key, "width") == 0) el->width = atoi(val);
+                    else if (strcmp(key, "max_width") == 0) el->max_width = atoi(val);
+                    else if (strcmp(key, "hide_label") == 0) el->hide_label = atoi(val) != 0;
                     else if (strcmp(key, "height") == 0) el->height = atoi(val);
                     else if (strcmp(key, "font") == 0) {
                         int f = atoi(val);
@@ -2197,7 +2268,7 @@ static void load_custom_screens(void) {
             }
             if (el->sensor[0]) cs->count++;
         } else if (strncmp(line, "IMAGE ", 6) == 0 && current >= 0) {
-            custom_screen_t *cs = &custom_screens[current];
+            custom_screen_t *cs = &current_custom_screen;
             if (cs->image_count >= MAX_IMAGES) continue;
             image_t *im = &cs->images[cs->image_count];
             im->path[0] = 0; im->x = 0; im->y = 0; im->width = 0; im->height = 0;
@@ -2222,7 +2293,7 @@ static void load_custom_screens(void) {
             if (im->path[0] && im->width > 0 && im->width <= G15_LCD_WIDTH &&
                 im->height > 0 && im->height <= G15_LCD_HEIGHT) cs->image_count++;
         } else if (strncmp(line, "TEXT ", 5) == 0 && current >= 0) {
-            custom_screen_t *cs = &custom_screens[current];
+            custom_screen_t *cs = &current_custom_screen;
             if (cs->text_count >= MAX_TEXTS) continue;
             text_t *tx = &cs->texts[cs->text_count];
             tx->content[0] = 0; tx->x = 0; tx->y = 0;
@@ -2251,7 +2322,7 @@ static void load_custom_screens(void) {
             }
             if (tx->content[0]) cs->text_count++;
         } else if (strncmp(line, "VISUALIZER ", 11) == 0 && current >= 0) {
-            custom_screen_t *cs = &custom_screens[current];
+            custom_screen_t *cs = &current_custom_screen;
             if (cs->visualizer_count >= MAX_VISUALIZERS) continue;
             visualizer_t *vz = &cs->visualizers[cs->visualizer_count];
             vz->x = 0; vz->y = 0; vz->width = 0; vz->height = 0;
@@ -2340,28 +2411,105 @@ static int draw_marquee_text(g15canvas *c, const char *text, int font_size,
     return 1;
 }
 
+static void draw_network_history(g15canvas *canvas, const element_t *el) {
+    int x = el->x, y = el->y;
+    if (x < 0 || y < 0 || x >= G15_LCD_WIDTH || y >= G15_LCD_HEIGHT) return;
+    int width = el->width, height = el->height;
+    if (width > G15_LCD_WIDTH - x) width = G15_LCD_WIDTH - x;
+    if (height > G15_LCD_HEIGHT - y) height = G15_LCD_HEIGHT - y;
+    if (width < 3 || height < 3) return;
+    if (g_element_bounds_count < MAX_ELEMENTS) {
+        element_bounds_t *b = &g_element_bounds[g_element_bounds_count++];
+        memset(b, 0, sizeof(*b));
+        b->label_x1 = b->label_x2 = x;
+        b->label_y1 = b->label_y2 = y;
+        b->value_x2 = x + width;
+        b->is_bar = 1;
+        b->bar_x1 = x; b->bar_y1 = y;
+        b->bar_x2 = x + width; b->bar_y2 = y + height;
+    }
+    int bottom = y + height - 1;
+    g15r_drawLine(canvas, x, y, x, bottom, G15_COLOR_BLACK);
+    g15r_drawLine(canvas, x, bottom, x + width - 1, bottom, G15_COLOR_BLACK);
+    if (!g_net_history.count) return;
+    const double *values = strcmp(el->sensor, "NET_UP") == 0
+        ? g_net_history.up : g_net_history.down;
+    double peak = 1;
+    for (int i = 0; i < g_net_history.count; i++)
+        if (values[i] > peak) peak = values[i];
+    int previous_x = -1, previous_y = 0;
+    for (int i = 0; i < g_net_history.count; i++) {
+        /* New samples enter at the right; the time window never stretches. */
+        int sample_x = x + 1 + (NET_HISTORY_SAMPLES - g_net_history.count + i) *
+                       (width - 2) / (NET_HISTORY_SAMPLES - 1);
+        int sample_y = bottom - (int)lround(values[i] / peak * (height - 2));
+        if (previous_x >= 0)
+            g15r_drawLine(canvas, previous_x, previous_y, sample_x, sample_y, G15_COLOR_BLACK);
+        else g15r_setPixel(canvas, sample_x, sample_y, G15_COLOR_BLACK);
+        previous_x = sample_x;
+        previous_y = sample_y;
+    }
+}
+
 static void draw_element(g15canvas *c, element_t *el) {
     const sensor_def_t *def = find_sensor(el->sensor);
     if (!def) return;
-    char default_core_label[8];
-    const char *label = el->label[0] ? el->label : def->label;
-    if (!el->label[0] && strncmp(el->sensor, "CPU_CORE_", 9) == 0) {
-        int core = atoi(el->sensor + 9);
-        if (core >= 0 && core < 8) {
-            snprintf(default_core_label, sizeof(default_core_label), "C%d", core + 1);
-            label = default_core_label;
-        }
+    if (strcmp(el->style, "history") == 0 &&
+        (strcmp(el->sensor, "NET_DOWN") == 0 || strcmp(el->sensor, "NET_UP") == 0)) {
+        draw_network_history(c, el);
+        return;
     }
+    element_t fitted = *el;
+    el = &fitted;
+    const char *label = el->hide_label ? "" : (el->label[0] ? el->label : def->label);
     if (strcmp(el->sensor, "TIME") == 0 || strcmp(el->sensor, "DATE") == 0) {
         label = "";
     }
     double pct_for_bar;
     char disp[32];
     get_sensor_value(el->sensor, el->format, &pct_for_bar, disp, sizeof(disp));
+    if (strcmp(el->style, "gauge") == 0 && (def->is_percent || def->is_temp)) {
+        int width = el->width, height = el->height;
+        if (el->x < 0 || el->y < 0 || width < 3 || height < 3 ||
+            width > G15_LCD_WIDTH - el->x || height > G15_LCD_HEIGHT - el->y) return;
+        int fill = pct_for_bar < 0 ? 0 : (int)lround(fmin(100, pct_for_bar) * (width - 2) / 100);
+        g15r_pixelBox(c, el->x, el->y, el->x + width - 1, el->y + height - 1,
+                      G15_COLOR_BLACK, 1, G15_PIXEL_NOFILL);
+        if (fill) g15r_pixelBox(c, el->x + 1, el->y + 1, el->x + fill,
+                                el->y + height - 2, G15_COLOR_BLACK, 1, G15_PIXEL_FILL);
+        g15canvas text G15_CANVAS_AUTO = {0};
+        g15r_initCanvas(&text);
+        truncate_builtin_text(disp, G15_TEXT_SMALL, width - 4);
+        g15r_renderString(&text, (unsigned char *)disp, 0, G15_TEXT_SMALL, 0, 0);
+        for (int y = 0; y < height - 2; y++)
+            for (int x = 0; x < width - 4; x++)
+                if (g15r_getPixel(&text, x, y))
+                    g15r_setPixel(c, el->x + 2 + x, el->y + 1 + y,
+                                 x + 2 <= fill ? G15_COLOR_WHITE : G15_COLOR_BLACK);
+        if (g_element_bounds_count < MAX_ELEMENTS) {
+            element_bounds_t *b = &g_element_bounds[g_element_bounds_count++];
+            memset(b, 0, sizeof(*b));
+            b->label_x1 = b->label_x2 = b->bar_x1 = el->x;
+            b->label_y1 = b->label_y2 = b->bar_y1 = el->y;
+            b->bar_x2 = b->value_x2 = el->x + width;
+            b->bar_y2 = el->y + height;
+            b->is_bar = 1;
+        }
+        return;
+    }
+    if (el->max_width > 0 && strcmp(el->style, "number") == 0) {
+        while (el->font_size > G15_TEXT_SMALL) {
+            int width = measure_builtin_label_width(label, el->font_size) +
+                        (label[0] ? 2 : 4) +
+                        measure_temperature_value_width(disp, el->font_size);
+            if (width <= el->max_width) break;
+            el->font_size--;
+        }
+    }
 
     int vertical_bar = strcmp(el->style, "bar") == 0 &&
                        strcmp(el->orientation, "vertical") == 0 &&
-                       (def->is_percent || def->is_temp) && pct_for_bar >= 0;
+                       (def->is_percent || def->is_temp);
     int label_w = 0;
     char sized_label[sizeof(el->label) + 1];
     snprintf(sized_label, sizeof(sized_label), "%s", label);
@@ -2373,7 +2521,7 @@ static void draw_element(g15canvas *c, element_t *el) {
         if (label_budget > visible_width) label_budget = visible_width;
         truncate_builtin_label(sized_label, el->font_size, label_budget);
         label_height = measure_builtin_label_height(sized_label, el->font_size);
-        vertical_label_height = el->height >= label_height + 2 ? label_height + 1 : 0;
+        vertical_label_height = sized_label[0] && el->height >= label_height + 2 ? label_height + 1 : 0;
         if (vertical_label_height) {
             label_w = measure_builtin_label_width(sized_label, el->font_size);
             draw_builtin_label(c, sized_label, el->x, el->y, el->font_size);
@@ -2381,15 +2529,17 @@ static void draw_element(g15canvas *c, element_t *el) {
             label_w = el->width;
         }
     } else {
-        truncate_builtin_label(sized_label, el->font_size,
-                               G15_LCD_WIDTH - TEXT_EDGE_MARGIN - el->x);
+        int label_budget = G15_LCD_WIDTH - TEXT_EDGE_MARGIN - el->x;
+        if (el->max_width > 0 && label_budget > el->max_width)
+            label_budget = el->max_width;
+        truncate_builtin_label(sized_label, el->font_size, label_budget);
         label_height = measure_builtin_label_height(sized_label, el->font_size);
         label_w = measure_builtin_label_width(sized_label, el->font_size);
         if (!def->auto_center) draw_builtin_label(c, sized_label, el->x, el->y, el->font_size);
     }
     /* Abstand zwischen Label und Wert in Pixeln */
     const int gap = 2;
-    int value_x = el->x + label_w + (label_w ? gap : 4);
+    int value_x = el->x + label_w + (label_w ? gap : (el->hide_label ? 0 : 4));
 
     element_bounds_t *b = (g_element_bounds_count < MAX_ELEMENTS)
         ? &g_element_bounds[g_element_bounds_count++] : NULL;
@@ -2409,6 +2559,8 @@ static void draw_element(g15canvas *c, element_t *el) {
        measure_builtin_text_width()) before either draw path below
        ever renders it, so nothing this function draws can overflow. */
     int avail = G15_LCD_WIDTH - TEXT_EDGE_MARGIN - value_x;
+    if (el->max_width > 0 && avail > el->x + el->max_width - value_x)
+        avail = el->x + el->max_width - value_x;
     truncate_sensor_value(disp, el->font_size, avail, def->is_temp);
     int value_w = measure_temperature_value_width(disp, el->font_size);
 
@@ -2466,7 +2618,10 @@ static void draw_element(g15canvas *c, element_t *el) {
         if (bar_width > G15_LCD_WIDTH - bar_x1) bar_width = G15_LCD_WIDTH - bar_x1;
         if (bar_height < 2) bar_height = 2;
         if (bar_height > G15_LCD_HEIGHT - bar_y1) bar_height = G15_LCD_HEIGHT - bar_y1;
-        draw_vertical_slim_bar(c, bar_x1, bar_y1, bar_width, bar_height, (int)pct_for_bar);
+        draw_vertical_slim_bar(c, bar_x1, bar_y1, bar_width, bar_height,
+                               pct_for_bar < 0 ? 0 : (int)pct_for_bar);
+        if (el->hide_label)
+            g15r_drawLine(c, bar_x1, bar_y1, bar_x1 + bar_width - 1, bar_y1, G15_COLOR_BLACK);
         if (b) {
             b->label_x1 = bar_x1;
             b->label_y1 = el->y;
@@ -2545,7 +2700,7 @@ static void draw_element(g15canvas *c, element_t *el) {
 }
 
 /* Writes the bounds sidecar for --preview mode. Plain text, one line
-   per element in the same order load_custom_screens() produced them
+   per element in the same order load_custom_screen() produced them
    (matches the GUI's own element list index-for-index). */
 static void write_bounds_meta(const char *outpath) {
     /* Same atomic tmp+rename() pattern as write_ppm() above, same
@@ -3298,16 +3453,63 @@ static void draw_media_icon(g15canvas *c, int x, int y, int playing) {
     }
 }
 
+static void draw_idle_animation_frame(g15canvas *c, int gaming, double seconds) {
+    const char *heading = gaming ? "GAMING" : "MEDIA CENTER";
+    int width = measure_builtin_text_width(heading, G15_TEXT_MED);
+    g15r_renderString(c, (unsigned char *)heading, 0, G15_TEXT_MED,
+                      (G15_LCD_WIDTH - width) / 2, 1);
+    if (gaming) {
+        /* A looping pixel spacecraft patrol, not a simulated running game. */
+        int ship_x = 18 + (int)(seconds * 18) % 124;
+        for (int i = 0; i < 13; i++) {
+            int x = (i * 29 + 160 - (int)fmod(seconds * (8 + i % 3), 160)) % 160;
+            int y = 13 + (i * 7) % 23;
+            g15r_setPixel(c, x, y, G15_COLOR_BLACK);
+        }
+        for (int i = 0; i < 9; i++) {
+            int half_height = (8 - i) / 2;
+            g15r_pixelBox(c, ship_x + i, 24 - half_height,
+                          ship_x + i, 24 + half_height, G15_COLOR_BLACK, 1, 1);
+        }
+        g15r_pixelBox(c, ship_x - 3, 22, ship_x - 1, 26, G15_COLOR_BLACK, 1, 0);
+        int flame = 3 + (int)(seconds * 8) % 4;
+        g15r_drawLine(c, ship_x - 4 - flame, 24, ship_x - 4, 24, G15_COLOR_BLACK);
+        int laser_x = (ship_x + 14 + (int)(seconds * 50) % 100) % 156;
+        g15r_drawLine(c, laser_x, 24, laser_x + 3, 24, G15_COLOR_BLACK);
+    } else {
+        /* Decorative waveform; deliberately distinct from the live spectrum. */
+        int previous_y = 24;
+        for (int x = 0; x < G15_LCD_WIDTH; x++) {
+            double envelope = sin(x * M_PI / (G15_LCD_WIDTH - 1));
+            int y = 24 + (int)(7 * envelope * sin(x * 0.13 - seconds * 2.4));
+            if (x) g15r_drawLine(c, x - 1, previous_y, x, y, G15_COLOR_BLACK);
+            previous_y = y;
+        }
+        int bob = (int)(2 * sin(seconds * 2));
+        g15r_drawLine(c, 76, 16 + bob, 76, 28 + bob, G15_COLOR_BLACK);
+        g15r_drawLine(c, 76, 16 + bob, 84, 14 + bob, G15_COLOR_BLACK);
+        g15r_drawLine(c, 84, 14 + bob, 84, 26 + bob, G15_COLOR_BLACK);
+        g15r_pixelBox(c, 72, 27 + bob, 76, 29 + bob, G15_COLOR_BLACK, 1, 1);
+        g15r_pixelBox(c, 80, 25 + bob, 84, 27 + bob, G15_COLOR_BLACK, 1, 1);
+    }
+    const char *caption = gaming ? "Ready to rumble" : "BEREIT FUER MUSIK & FILM";
+    width = measure_builtin_text_width(caption, G15_TEXT_SMALL);
+    g15r_renderString(c, (unsigned char *)caption, 0, G15_TEXT_SMALL,
+                      (G15_LCD_WIDTH - width) / 2, 36);
+}
+
+static void draw_idle_animation(g15canvas *c, int gaming) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double seconds = fmod(now.tv_sec + now.tv_nsec / 1e9, 60.0);
+    draw_idle_animation_frame(c, gaming, seconds);
+    g_marquee_active = 1;
+}
+
 static void draw_media_dashboard(g15canvas *c) {
     const int text_x = 14, text_w = G15_LCD_WIDTH - text_x - 3;
-    if (!g_media_title[0]) {
-        draw_media_icon(c, 70, 6, 0);
-        const char *idle = "Keine Wiedergabe";
-        int w = measure_builtin_text_width(idle, G15_TEXT_MED);
-        g15r_renderString(c, (unsigned char*)idle, 0, G15_TEXT_MED,
-                          (G15_LCD_WIDTH - w) / 2, 20);
-        visualizer_t vz = {0, 31, G15_LCD_WIDTH, 12};
-        draw_visualizer_element(c, &vz);
+    if (!g_media_title[0] || g_media_is_game) {
+        draw_idle_animation(c, 0);
         return;
     }
     int has_artist = g_media_artist[0] != 0;
@@ -3345,12 +3547,12 @@ static void draw_media_dashboard(g15canvas *c) {
 
 static void draw_custom_screen(g15canvas *c, int screen_num) {
     g_element_bounds_count = 0;
+    load_custom_screen(screen_num);
     if (screen_num == GAME_SCREEN && g_media_is_game) {
         draw_game_dashboard(c);
         return;
     }
-    load_custom_screens();
-    custom_screen_t *cs = &custom_screens[screen_num - 2];
+    custom_screen_t *cs = &current_custom_screen;
     /* Direct request: "this placeholder text on l3 l4 l5 gone" -- the
        "L3 / not set up yet" label used to be drawn here whenever a
        screen was genuinely empty. Confirmed via a real screenshot that
@@ -3358,19 +3560,22 @@ static void draw_custom_screen(g15canvas *c, int screen_num) {
        honest empty-state indicator, so an unconfigured screen now just
        draws nothing -- matches what the real LCD should show for a
        screen with nothing on it. */
-    if (cs->count == 0 && cs->image_count == 0 && cs->text_count == 0 && cs->visualizer_count == 0) {
+    if (cs->count == 0 && cs->image_count == 0 && cs->text_count == 0 &&
+        cs->frame_count == 0 && cs->visualizer_count == 0) {
         if (screen_num == MUSIC_SCREEN) {
             draw_media_dashboard(c);
             g_marquee_active = 1; /* spectrum needs the fast redraw */
             return;
         }
-        if (screen_num == GAME_SCREEN && g_media_is_game && g_media_title[0]) {
-            char title[sizeof(g_media_title)];
-            snprintf(title, sizeof(title), "%s", g_media_title);
-            truncate_builtin_label(title, G15_TEXT_MED, G15_LCD_WIDTH - 4);
-            draw_builtin_label(c, title, 2, 2, G15_TEXT_MED);
+        if (screen_num == GAME_SCREEN) {
+            draw_idle_animation(c, 1);
         }
         return;
+    }
+    for (int i = 0; i < cs->frame_count; i++) {
+        frame_t *frame = &cs->frames[i];
+        g15r_pixelBox(c, frame->x, frame->y, frame->x + frame->width - 1,
+                      frame->y + frame->height - 1, G15_COLOR_BLACK, 1, G15_PIXEL_NOFILL);
     }
     for (int i = 0; i < cs->count; i++) draw_element(c, &cs->elements[i]);
     for (int i = 0; i < cs->image_count; i++) draw_image_element(c, &cs->images[i]);
@@ -3435,12 +3640,35 @@ int main(int argc, char **argv) {
         g15canvas canvas G15_CANVAS_AUTO = {0};
         g15r_initCanvas(&canvas);
         update_net_speed();
+        int have_network_snapshot = read_network_snapshot();
         update_nvidia_stats();
+        update_cpu_core_percent();
         update_media_info();
         update_game_title();
         viz_set_preview_placeholder();
+        if (screen >= 2) {
+            load_custom_screen(screen);
+            for (int i = 0; i < current_custom_screen.count; i++) {
+                if (strncmp(current_custom_screen.elements[i].sensor, "CPU_CORE_", 9) == 0) {
+                    usleep(100000);
+                    update_cpu_core_percent();
+                    break;
+                }
+            }
+        }
+        if (screen >= 2 && !have_network_snapshot) {
+            load_custom_screen(screen);
+            for (int i = 0; i < current_custom_screen.count; i++) {
+                const char *sensor = current_custom_screen.elements[i].sensor;
+                if (strcmp(sensor, "NET_DOWN") == 0 || strcmp(sensor, "NET_UP") == 0) {
+                    usleep(100000);
+                    update_net_speed();
+                    break;
+                }
+            }
+        }
         if (screen == 1) draw_clock_screen(&canvas);
-        else if (screen >= 2 && screen <= 5) {
+        else if (screen >= 2) {
             draw_custom_screen(&canvas, screen);
             write_bounds_meta(outpath);
         } else draw_stats_screen(&canvas);
@@ -3470,7 +3698,9 @@ int main(int argc, char **argv) {
         time_t now_t = time(NULL);
         if (difftime(now_t, last_slow_update) >= 1.0) {
             update_net_speed();
+            publish_network_snapshot();
             update_nvidia_stats();
+            update_cpu_core_percent();
             update_media_info();
             update_game_title();
             update_media_screen_selection();
@@ -3485,7 +3715,7 @@ int main(int argc, char **argv) {
             sleep(1);
             continue;
         }
-        if (screen >= 2 && screen <= 5) {
+        if (screen >= 2) {
             g_marquee_active = 0;
             draw_custom_screen(&canvas, screen);
             send_frame(&canvas);
@@ -3493,7 +3723,7 @@ int main(int argc, char **argv) {
                HAVE a visualizer on them -- a plain sensor/text/image
                screen gains nothing from redrawing 10x/sec and would
                just burn CPU and USB bandwidth for no visible change. */
-            custom_screen_t *cs = &custom_screens[screen - 2];
+            custom_screen_t *cs = &current_custom_screen;
             if (cs->visualizer_count > 0 || g_marquee_active) {
                 /* Was ~10fps (100ms). Direct request: "i need the
                    visualizer respons faster" -- the real bottleneck

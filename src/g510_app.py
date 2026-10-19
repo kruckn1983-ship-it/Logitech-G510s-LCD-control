@@ -2,36 +2,78 @@
 """
 G510 LCD Control App.
 
-Architecture: one QTabWidget, one tab per feature. Adding a new feature
-= adding a new tab class + one line in MainWindow.__init__. Nothing in
-an existing tab needs to change when a new one is added.
+Architecture: sidebar navigation with one stacked page per feature.
+Existing feature widgets retain their independent controls and lifecycle.
 
 Phase 1: Backlight tab (color/brightness + service control).
          G-Keys tab (record/assign macros to G1-G18 per M1/M2/M3 profile).
 Phase 2: Custom Screens tab (AIDA64-style sensor dashboard builder for
-         the L2-L5 buttons, with a live preview of the real LCD output).
+         LCD screens, with a live preview of the real LCD output).
 """
 import sys
 import json
 import shutil
 import subprocess
 import datetime
-import urllib.parse
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
+    QApplication, QMainWindow, QStackedWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QComboBox, QPushButton, QLabel,
     QMessageBox, QDialog, QLineEdit, QSpinBox, QFrame, QScrollArea,
     QFileDialog, QInputDialog, QStatusBar, QListWidget, QListWidgetItem,
-    QCheckBox,
+    QCheckBox, QSizePolicy, QShortcut,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QPoint
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QPainter, QPen, QFontMetrics
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QFontMetrics, QKeySequence
 import evdev
 from evdev import ecodes
 
 import g510_canvas
+from g510_theme import STYLESHEET
+from g510_layouts import (
+    LCD_WIDTH,
+    LCD_HEIGHT,
+    DEFAULT_SCREEN_PRESETS,
+    SCREEN_NAMES,
+    PRESET_NAMES,
+    CPU_CORE_SENSOR_COUNT,
+    MAX_SENSOR_ELEMENTS,
+    GAME_BOUNDS_BASE,
+    build_layout_preset,
+    SENSOR_CHOICES,
+    SENSOR_LABELS,
+    DEFAULT_SENSOR_DISPLAY_LABELS,
+    DATETIME_FORMAT_CHOICES,
+    DATETIME_FORMAT_DEFAULTS,
+    SENSOR_DESCRIPTIONS,
+    BAR_CAPABLE_SENSORS,
+    LEGACY_SENSOR_ALIASES,
+    CUSTOM_SCREEN_KEYS,
+    MAX_IMAGES_PER_SCREEN,
+    MAX_TEXTS_PER_SCREEN,
+    MAX_VISUALIZERS_PER_SCREEN,
+    DEFAULT_VISUALIZER_WIDTH,
+    DEFAULT_VISUALIZER_HEIGHT,
+    TEXT_CHAR_PX,
+    FONT_SIZE_CHOICES,
+    MAX_BAR_FONT_SIZE,
+    FONT_SIZE_SCALE,
+)
+from g510_screen_canvas import (
+    ScreenPreviewCanvas, PREVIEW_SCALE, ELEMENT_HIT_W, ELEMENT_HIT_H,
+    RESIZE_HANDLE_PX, MIN_BAR_WIDTH, MAX_BAR_WIDTH,
+    MIN_BAR_HEIGHT, MAX_BAR_HEIGHT, MIN_IMAGE_SIZE,
+)
+import g510_layout_store as layout_store
+from g510_layout_store import GAME_DASHBOARD_COMPONENTS
+import g510_preview as preview_renderer
+from g510_key_settings import ScreenKeysTab
+from g510_screen_keys import (
+    action_labels, load_bindings, next_screen, show_screen, read_screen,
+    load_screens, load_screen_catalog, save_screen_catalog,
+    CLOCK_LAYOUTS, load_clock_layout, save_clock_layout,
+)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 LED_DIR = Path("/sys/class/leds/g15::kbd_backlight")
@@ -85,135 +127,6 @@ _migrate_dir_if_needed(PROJECT_DIR / "custom_screen_images", DATA_DIR / "custom_
 MACROS_FILE = DATA_DIR / "macros.json"
 CUSTOM_SCREENS_FILE = DATA_DIR / "custom_screens.txt"
 DEFAULTS_SCRIPT_DATA_DIR = DATA_DIR / "set-backlight-color.sh"
-LCD_WIDTH = 160
-LCD_HEIGHT = 43
-
-# Shared dark theme, copied verbatim from the sibling G910 app's
-# g910_app.py for visual consistency across the two projects.
-STYLESHEET = """
-QWidget {
-    background-color: #17171a;
-    color: #e4e4e7;
-    font-family: sans-serif;
-}
-QTabWidget::pane {
-    border: 1px solid #2a2a30;
-    border-radius: 6px;
-    top: -1px;
-}
-QTabBar::tab {
-    background: #1e1e22;
-    border: 1px solid #2a2a30;
-    padding: 8px 18px;
-    margin-right: 2px;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-}
-QTabBar::tab:selected {
-    background: #26262b;
-    border-bottom-color: #26262b;
-    color: white;
-}
-QPushButton {
-    background-color: #26262b;
-    border: 1px solid #34343a;
-    border-radius: 6px;
-    padding: 7px 10px;
-    text-align: left;
-}
-QPushButton:hover {
-    background-color: #302f36;
-    border-color: #46454e;
-}
-QPushButton:checked {
-    background-color: #3a6cc4;
-    border-color: #5a8ce0;
-    color: white;
-}
-QPushButton#Primary {
-    background-color: #3a6cc4;
-    border-color: #5a8ce0;
-    color: white;
-    text-align: center;
-    font-weight: 600;
-    padding: 9px 10px;
-}
-QPushButton#Primary:hover {
-    background-color: #4a7cd4;
-    border-color: #6a9cf0;
-}
-QPushButton#PanelPrimary {
-    background-color: #3a6cc4;
-    border-color: #5a8ce0;
-    color: white;
-    text-align: center;
-    font-weight: 600;
-    font-size: 11px;
-    padding: 4px 8px;
-    min-height: 28px;
-}
-QPushButton#PanelPrimary:hover {
-    background-color: #4a7cd4;
-    border-color: #6a9cf0;
-}
-QPushButton#PanelButton {
-    font-size: 11px;
-    padding: 4px 8px;
-    text-align: center;
-    min-height: 28px;
-}
-QLabel#Title {
-    font-size: 15px;
-    font-weight: 600;
-    padding: 4px 2px 10px 2px;
-}
-QLabel#PanelSection {
-    color: #c9c9d0;
-    font-weight: 600;
-    padding-top: 4px;
-}
-QWidget#Panel {
-    background-color: #1c1c20;
-    border: 1px solid #2a2a30;
-    border-radius: 8px;
-}
-QFrame#Separator {
-    background-color: #2a2a30;
-    border: none;
-    max-width: 1px;
-    min-width: 1px;
-}
-QLabel#Status {
-    color: #9a9aa2;
-    font-size: 11px;
-    padding-top: 4px;
-}
-QPushButton#Discreet {
-    background-color: transparent;
-    border: 1px solid #2a2a30;
-    color: #8a8a92;
-    font-size: 11px;
-    padding: 4px 6px;
-    text-align: center;
-}
-QPushButton#Discreet:hover {
-    background-color: #26262b;
-    color: #c0c0c6;
-    border-color: #3a3a42;
-}
-QLineEdit {
-    background-color: #1e1e22;
-    border: 1px solid #34343a;
-    border-radius: 4px;
-    padding: 5px;
-    min-height: 24px;
-}
-QComboBox {
-    min-height: 28px;
-    padding: 3px 8px;
-}
-"""
-
 
 def active_profile_file():
     import os
@@ -230,13 +143,13 @@ def read_active_screen_num():
     Corrected after a real report ("the hardcoded L1 screen, not the
     clock, the stats, are not visible") -- 0 and 1 are NOT both "the
     clock". Reading g510_lcd_stats.c's own screen-select logic
-    directly: `screen == 1` draws the clock, `2 <= screen <= 5` draws
-    a custom L2-L5 screen, and everything else -- which in practice
+    directly: `screen == 1` draws the clock, `screen >= 2` draws
+    a custom screen, and everything else -- which in practice
     means 0, the state before any L-button has ever been pressed --
     draws the CPU/RAM/VRAM/TEMP stats screen. An earlier version of
     this function collapsed 0 into 1, so the mirror silently showed
     the clock instead of stats whenever the real hardware was on 0.
-    render_preview()/--preview accept 0-5 directly (same atoi(argv[2])
+    render_preview()/--preview accept screen IDs directly (same atoi(argv[2])
     the live daemon's read_screen() feeds into), so no translation is
     needed here beyond passing the real value through unchanged.
 
@@ -249,7 +162,7 @@ def read_active_screen_num():
         s = int(Path(runtime, "g510lcd_screen").read_text().strip())
     except Exception:
         return 0
-    return s if 0 <= s <= 5 else 0
+    return s if s >= 0 else 0
 
 COLOR_RGB = {
     "Blauviolett": (110, 0, 255),
@@ -263,89 +176,12 @@ COLOR_RGB = {
     "Weiß": (255, 255, 255),
 }
 
-# Standardbelegung der Tasten L2-L5 (Vorlage pro Taste)
-DEFAULT_SCREEN_PRESETS = {
-    "L2": "system",
-    "L3": "media",
-    "L4": "temperatures",
-    "L5": "network",
-}
-
 # Profile: LED-Farbe + anzuzeigender LCD-Bildschirm (0 = Statistik, 2-5 = L2-L5)
 PROFILES = {
     "Spiel": {"rgb": (255, 0, 0), "screen": 2},
     "Arbeit": {"rgb": (0, 120, 255), "screen": 4},
     "Nacht": {"rgb": (60, 0, 0), "screen": 1},
 }
-
-PRESET_NAMES = {
-    "performance": "CPU-/GPU-Auslastung",
-    "temperatures": "Temperaturübersicht",
-    "system": "Systemübersicht",
-    "network": "Netzwerk, Laufwerke und Uhr",
-    "media": "Medienwiedergabe",
-}
-
-
-def build_layout_preset(preset):
-    """Liefert die Elementliste einer Dashboard-Vorlage."""
-    def sensor(key, x, y, style="number", width=40, orientation="horizontal",
-               height=28, font_size=0):
-        element = {
-            "kind": "sensor", "sensor": key, "style": style,
-            "orientation": orientation, "x": x, "y": y,
-            "width": width, "height": height, "font_size": font_size,
-        }
-        if key in DATETIME_FORMAT_DEFAULTS:
-            element["format"] = DATETIME_FORMAT_DEFAULTS[key]
-        return element
-
-    if preset == "performance":
-        elements = [
-            sensor(f"CPU_CORE_{core}", core * 10, 11, "bar", 8, "vertical", 29)
-            for core in range(8)
-        ]
-        elements.extend([
-            {**sensor("GPU_EDGE_TEMP", 82, 1), "label": "GPU"},
-            {**sensor("GPU_PCT", 82, 14, "bar", 28), "label": "GPU"},
-            {**sensor("RAM_PCT", 82, 29, "bar", 28), "label": "RAM"},
-            {"kind": "text", "content": "CPU", "x": 0, "y": 1, "font_size": 0},
-        ])
-    elif preset == "temperatures":
-        elements = [
-            {**sensor("CPU_TEMP", 2, 2, font_size=1), "label": "CPU"},
-            {**sensor("GPU_EDGE_TEMP", 82, 2, font_size=1), "label": "GPU"},
-            {**sensor("MAXTEMP", 2, 17, font_size=1), "label": "MAX"},
-            {**sensor("GPU_HOTSPOT_TEMP", 82, 17, font_size=1), "label": "HOT"},
-            {**sensor("GPU_VRAM_TEMP", 2, 32, font_size=1), "label": "VRAM"},
-        ]
-    elif preset == "network":
-        elements = [
-            sensor("NET_DOWN", 2, 2, font_size=1),
-            sensor("NET_UP", 2, 14, font_size=1),
-            sensor("DISK_ROOT_PCT", 2, 27, "bar", 45, font_size=0),
-            sensor("TIME", 100, 2, font_size=1),
-            {**sensor("DATE", 100, 14, font_size=1), "format": "eu"},
-        ]
-    elif preset == "media":
-        elements = [
-            sensor("MEDIA_TITLE", 2, 1, font_size=1),
-            sensor("MEDIA_ARTIST", 2, 11, font_size=0),
-            sensor("MEDIA_ELAPSED", 2, 20, "bar", 65, font_size=0),
-            {"kind": "visualizer", "x": 0, "y": 29,
-             "width": LCD_WIDTH, "height": 14},
-        ]
-    else:
-        elements = [
-            sensor("TIME", 2, 0, font_size=2),
-            {**sensor("DATE", 100, 1, font_size=1), "format": "eu"},
-            {**sensor("CPU_TEMP", 2, 15, font_size=2), "label": "CPU"},
-            {**sensor("GPU_EDGE_TEMP", 82, 15, font_size=2), "label": "GPU"},
-            sensor("CPU_PCT", 2, 33, font_size=1),
-            sensor("RAM_PCT", 55, 33, font_size=1),
-            sensor("VRAM_PCT", 108, 33, font_size=1),
-        ]
-    return elements
 
 
 def read_current_rgb():
@@ -376,7 +212,6 @@ echo "{rgb[0]} {rgb[1]} {rgb[2]}" > /sys/class/leds/g15::kbd_backlight/multi_int
         pass
     DEFAULTS_SCRIPT_DATA_DIR.write_text(script)
     DEFAULTS_SCRIPT_DATA_DIR.chmod(0o755)
-
 
 
 # Brightness used to be user-adjustable here, but real testing (writing
@@ -663,6 +498,7 @@ class KeyboardTab(QWidget):
 
         hint = QLabel("G-Taste anklicken, um ein Makro aufzunehmen  •  M1/M2/M3 anklicken, um das Profil zu wechseln  •  goldener Rahmen = Makro zugewiesen")
         hint.setObjectName("Status")
+        hint.setWordWrap(True)
         canvas_col.addWidget(hint)
         canvas_col.addStretch()
         root.addLayout(canvas_col, stretch=1)
@@ -774,7 +610,6 @@ class KeyboardTab(QWidget):
         # pattern as the old GKeysTab's profile poll timer.
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll_hardware_state)
-        self.poll_timer.start(500)
 
         # Live-mirrors whatever's actually showing on the physical LCD
         # into the canvas's LCD cell. Separate, much slower timer than
@@ -785,8 +620,18 @@ class KeyboardTab(QWidget):
         # cadence (see G510_README.md) instead.
         self.lcd_mirror_timer = QTimer(self)
         self.lcd_mirror_timer.timeout.connect(self.refresh_lcd_mirror)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.poll_timer.start(500)
         self.lcd_mirror_timer.start(2000)
-        self.refresh_lcd_mirror()  # don't wait 2s for the first frame
+        self.poll_hardware_state()
+        self.refresh_lcd_mirror()
+
+    def hideEvent(self, event):
+        self.poll_timer.stop()
+        self.lcd_mirror_timer.stop()
+        super().hideEvent(event)
 
     def select_profile(self, name):
         self.current_profile = name
@@ -884,857 +729,32 @@ class KeyboardTab(QWidget):
             QMessageBox.critical(self, "Fehler", err)
 
 
-# --- Custom Screens (v1.1): dashboards for L2-L5, mirrors the sensor
-# table in g510_lcd_stats.c's SENSORS[] array. Keep the two in sync if a
-# sensor is ever added or renamed -- there's no shared source of truth
-# because one side is C and the other Python, by design (no JSON/IPC
-# schema needed for something this small).
-SENSOR_CHOICES = [
-    ("CPU_PCT", "CPU %"),
-    *[(f"CPU_CORE_{i}", f"CPU-Kern {i + 1} %") for i in range(8)],
-    ("CPU_GHZ", "CPU GHz"),
-    ("CPU_TEMP", "CPU-Temperatur"),
-    ("RAM_PCT", "RAM %"),
-    ("RAM_AMOUNT", "RAM belegt (Menge)"),
-    ("VRAM_PCT", "VRAM %"),
-    ("VRAM_AMOUNT", "VRAM belegt (Menge)"),
-    ("MAXTEMP", "Höchste Temperatur"),
-    ("GPU_PCT", "GPU %"),
-    ("GPU_EDGE_TEMP", "GPU-Edge-Temperatur"),
-    ("GPU_HOTSPOT_TEMP", "GPU-Hotspot-Temperatur"),
-    ("GPU_VRAM_TEMP", "GPU-VRAM-Temperatur"),
-    ("SWAP_PCT", "Swap %"),
-    ("DISK_ROOT_PCT", "Datenträger % (Root)"),
-    ("DISK_SECONDARY_PCT", "Datenträger % (sekundär)"),
-    ("UPTIME", "Laufzeit"),
-    ("NET_DOWN", "Netzwerk-Downloadrate"),
-    ("NET_UP", "Netzwerk-Uploadrate"),
-    ("TIME", "Uhrzeit"),
-    ("DATE", "Datum"),
-    ("MEDIA_TITLE", "Medien: Titel"),
-    ("MEDIA_ARTIST", "Medien: Interpret"),
-    ("MEDIA_ELAPSED", "Medien: Spielzeit"),
-    ("MB_TEMP1", "Mainboard-Temperatur 1 (unbeschriftet)"),
-    ("MB_TEMP2", "Mainboard-Temperatur 2 (unbeschriftet)"),
-    ("MB_TEMP3", "Mainboard-Temperatur 3 (unbeschriftet)"),
-    ("MB_TEMP4", "Mainboard-Temperatur 4 (unbeschriftet)"),
-    ("MB_TEMP5", "Mainboard-Temperatur 5 (unbeschriftet)"),
-    ("MB_TEMP6", "Mainboard-Temperatur 6 (unbeschriftet)"),
-]
-SENSOR_LABELS = dict(SENSOR_CHOICES)
-DEFAULT_SENSOR_DISPLAY_LABELS = {
-    "CPU_PCT": "CPU",
-    **{f"CPU_CORE_{i}": f"C{i + 1}" for i in range(8)},
-    "CPU_GHZ": "GHZ",
-    "CPU_TEMP": "CPU",
-    "RAM_PCT": "RAM",
-    "RAM_AMOUNT": "AMT",
-    "VRAM_PCT": "VRAM",
-    "VRAM_AMOUNT": "AMT",
-    "MAXTEMP": "MAXT",
-    "GPU_PCT": "GPU",
-    "GPU_EDGE_TEMP": "GPU",
-    "GPU_HOTSPOT_TEMP": "HOT",
-    "GPU_VRAM_TEMP": "VMEM",
-    "SWAP_PCT": "SWAP",
-    "DISK_ROOT_PCT": "DISK",
-    "DISK_SECONDARY_PCT": "DSK2",
-    "UPTIME": "UPTM",
-    "NET_DOWN": "DN",
-    "NET_UP": "UP",
-    "TIME": "",
-    "DATE": "",
-    "MEDIA_TITLE": "",
-    "MEDIA_ARTIST": "",
-    "MEDIA_ELAPSED": "",
-    **{f"MB_TEMP{i}": f"MB{i}" for i in range(1, 7)},
-}
-DATETIME_FORMAT_CHOICES = {
-    "TIME": [
-        ("hms", "24-Stunden HH:MM:SS"),
-        ("hm", "24-Stunden HH:MM"),
-        ("ampm", "12-Stunden HH:MM AM/PM"),
-    ],
-    "DATE": [
-        ("short", "TT Mon"),
-        ("eu", "TT.MM.JJJJ"),
-        ("eu_short", "TT.MM."),
-        ("iso", "JJJJ-MM-TT"),
-    ],
-}
-DATETIME_FORMAT_DEFAULTS = {"TIME": "hms", "DATE": "short"}
-
-# Direct feedback: "the functions are weird, i dont know from that
-# list what is what and exactly what they do." Plain-language
-# one-liners shown live under the sensor dropdown -- the ones that
-# aren't self-evident (MAXTEMP, the GPU Edge/Hotspot/VRAM temp split,
-# the unlabeled motherboard sensors) are worded from the *real*
-# semantics in g510_lcd_stats.c (checked directly, not assumed): MAXTEMP
-# is "since this program started", not all-time; Edge vs Hotspot are
-# two distinct, real AMD GPU sensors, not a duplicate/typo.
-SENSOR_DESCRIPTIONS = {
-    "CPU_PCT": "Gesamte CPU-Auslastung, gemittelt über alle Kerne.",
-    **{f"CPU_CORE_{i}": f"Auslastung des logischen CPU-Kerns {i + 1}." for i in range(8)},
-    "CPU_GHZ": "Aktuelle CPU-Taktfrequenz.",
-    "CPU_TEMP": "CPU-Package-Temperatur.",
-    "RAM_PCT": "Belegter RAM in Prozent des Gesamtspeichers.",
-    "RAM_AMOUNT": "Belegter RAM als konkrete Menge (z. B. 12,3 GB).",
-    "VRAM_PCT": "Belegter GPU-VRAM in Prozent des Gesamtspeichers.",
-    "VRAM_AMOUNT": "Belegter GPU-VRAM als konkrete Menge.",
-    "MAXTEMP": "Höchste CPU-Temperatur seit dem letzten Start des LCD-Dienstes – kein Allzeitrekord.",
-    "GPU_PCT": "GPU-Auslastung.",
-    "GPU_EDGE_TEMP": "Der Haupt-Temperatursensor des GPU-Chips – das, was die meisten Tools einfach „GPU-Temperatur“ nennen.",
-    "GPU_HOTSPOT_TEMP": "Der heißeste Punkt auf dem GPU-Chip – meist etwas höher als die Edge-Temperatur.",
-    "GPU_VRAM_TEMP": "Temperatur des GPU-Speichers (VRAM) – getrennt vom GPU-Chip selbst.",
-    "SWAP_PCT": "Belegter Swap-Speicher in Prozent des gesamten Swaps.",
-    "DISK_ROOT_PCT": "Belegter Speicherplatz im Root-Dateisystem (/).",
-    "DISK_SECONDARY_PCT": "Belegter Speicherplatz auf einem optionalen zweiten Laufwerk, falls eingerichtet.",
-    "UPTIME": "Wie lange dieser PC seit dem Start läuft.",
-    "NET_DOWN": "Aktuelle Download-Geschwindigkeit im Netzwerk.",
-    "NET_UP": "Aktuelle Upload-Geschwindigkeit im Netzwerk.",
-    "TIME": "Aktuelle Uhrzeit (dieselbe Uhr wie auf dem L1-Bildschirm).",
-    "DATE": "Aktuelles Datum (dieselbe Uhr wie auf dem L1-Bildschirm).",
-    "MEDIA_TITLE": "Titel des aktuell gespielten Songs über einen MPRIS-kompatiblen Player (Spotify, Browser-Tabs, VLC usw.). Leer, wenn nichts läuft.",
-    "MEDIA_ARTIST": "Aktuell gespielter Interpret, gleiche Quelle wie Medien: Titel.",
-    "MEDIA_ELAPSED": "Wiedergabeposition und Dauer. Der Balkenstil zeigt den Titelfortschritt bei Medien mit bekannter Dauer.",
-    **{f"MB_TEMP{i}": "Einer der Temperatursensoren deines Mainboards – die Hardware gibt nicht an, was er misst." for i in range(1, 7)},
-}
-
-# Only sensors with an honest 0-100 scale (a true percent, a temperature
-# via the 0-90C convention, or media playback progress) can be shown as a
-# bar -- matches is_percent/is_temp in the C SENSORS[] table exactly.
-# Other values would need a guessed scale, which we don't do.
-BAR_CAPABLE_SENSORS = {
-    "CPU_PCT", *{f"CPU_CORE_{i}" for i in range(8)},
-    "CPU_TEMP", "RAM_PCT", "VRAM_PCT", "MAXTEMP",
-    "GPU_PCT", "GPU_EDGE_TEMP", "GPU_HOTSPOT_TEMP", "GPU_VRAM_TEMP",
-    "SWAP_PCT", "DISK_ROOT_PCT", "DISK_SECONDARY_PCT",
-    "MEDIA_ELAPSED",
-    "MB_TEMP1", "MB_TEMP2", "MB_TEMP3", "MB_TEMP4", "MB_TEMP5", "MB_TEMP6",
-}
-
-# Renamed from DISK_FRIGIDER_PCT (a personal nickname for one specific
-# drive) to a generic name -- this alias means an existing
-# custom_screens.txt element saved under the old key still loads and
-# renders correctly instead of silently disappearing; the very next
-# auto-save (this app saves on every edit, no separate Save button)
-# rewrites it under the new key, a one-time silent migration, same
-# pattern as this project's other old-path/old-key migrations.
-LEGACY_SENSOR_ALIASES = {"DISK_FRIGIDER_PCT": "DISK_SECONDARY_PCT"}
-
-CUSTOM_SCREEN_KEYS = ["L2", "L3", "L4", "L5"]
-# L1 is the built-in clock screen (drawn by draw_clock_screen() in C,
-# not draw_custom_screen()) -- it has no ELEMENT lines of its own and
-# was never meant to be edited here. Included in the tab's screen
-# selector as a read-only preview only, per user request ("make a
-# preview panel for L1 too") -- kept separate from CUSTOM_SCREEN_KEYS
-# so load/save_custom_screens (which only know about real SCREEN
-# blocks) are untouched.
-SCREEN_PREVIEW_KEYS = ["L1"] + CUSTOM_SCREEN_KEYS
-
-
-MAX_IMAGES_PER_SCREEN = 2  # matches MAX_IMAGES in g510_lcd_stats.c
-MAX_TEXTS_PER_SCREEN = 4  # matches MAX_TEXTS in g510_lcd_stats.c
-MAX_VISUALIZERS_PER_SCREEN = 1  # matches MAX_VISUALIZERS in g510_lcd_stats.c -- only one persistent audio-capture stream exists process-wide, a second visualizer element would just duplicate the same bar data
 CUSTOM_SCREENS_PANEL_WIDTH = 290
 CUSTOM_SCREENS_PANEL_MAX_WIDTH = 420
 ELEMENT_ROW_FIELD_WIDTH = 126
-DEFAULT_VISUALIZER_WIDTH = 70
-DEFAULT_VISUALIZER_HEIGHT = 37
-TEXT_CHAR_PX = 6  # rough estimate for G15_TEXT_SMALL's per-character width -- no real font-metric access from Python for freeform text (same reason sensor elements originally needed the .meta sidecar), but text elements deliberately skip that mechanism (see on_add_text's docstring) so this stays an approximation, not pixel-perfect
-
-# Direct request: "id like to be able to resize elements". libg15render
-# only has 4 discrete built-in text sizes (checked the header: no
-# continuous scaling exists), so "resize" for Number/Text elements
-# means picking one of these, not a drag handle. Names shown in the
-# UI; values are g510_lcd_stats.c's G15_TEXT_SMALL/MED/LARGE/HUGE (0-3).
-FONT_SIZE_CHOICES = [(0, "Klein"), (1, "Mittel"), (2, "Groß"), (3, "Riesig")]
-# Self-audit finding: a bar's own height stays fixed regardless of its
-# value text's size (BAR_H doesn't scale), so Large/Huge next to a bar
-# rendered as a big chunky number next to a thin line -- correct, just
-# visually unbalanced. Bar values are capped at Medium; Number/Text
-# elements can still use the full range.
-MAX_BAR_FONT_SIZE = 1
-# Real measured width/height scale relative to SMALL (rendered "88" on
-# an actual canvas and scanned the lit-pixel bounding box, same
-# technique used throughout this project for font metrics -- not
-# guessed): SMALL=7x5, MED=9x6, LARGE=15x7, HUGE=13x10. Used only to
-# scale TEXT_CHAR_PX/ELEMENT_HIT_H for freeform text's own estimated
-# hit-box (see _element_rect) -- sensor elements get their bounds from
-# the C-side .meta sidecar instead, unaffected by this.
-FONT_SIZE_SCALE = {0: (1.0, 1.0), 1: (9 / 7, 6 / 5), 2: (15 / 7, 7 / 5), 3: (13 / 7, 10 / 5)}
 
 CUSTOM_SCREEN_IMAGES_DIR = DATA_DIR / "custom_screen_images"
 GAME_DASHBOARD_FILE = DATA_DIR / "game_dashboard_positions.txt"
-GAME_DASHBOARD_COMPONENTS = ("logo", "cpu", "gpu")
-
-
-def _encode_custom_screen_value(value):
-    """Encode freeform values so whitespace and underscores round-trip
-    through the LCD service's space-delimited config format."""
-    return urllib.parse.quote(value, safe="-.~").replace("_", "%5F")
-
-
-def _decode_custom_screen_value(value):
-    return urllib.parse.unquote(value)
-
-
-def load_game_dashboard_offsets():
-    offsets = {component: {"x": 0, "y": 0} for component in GAME_DASHBOARD_COMPONENTS}
-    if not GAME_DASHBOARD_FILE.exists():
-        return offsets
-    for token in GAME_DASHBOARD_FILE.read_text().split():
-        if "=" not in token:
-            continue
-        key, value = token.split("=", 1)
-        component, separator, axis = key.partition("_")
-        if separator and component in offsets and axis in ("x", "y"):
-            try:
-                offsets[component][axis] = int(value)
-            except ValueError:
-                continue
-    return offsets
-
-
-def save_game_dashboard_offsets(offsets):
-    lines = [
-        f"{component}_{axis}={offsets[component][axis]}"
-        for component in GAME_DASHBOARD_COMPONENTS
-        for axis in ("x", "y")
-    ]
-    GAME_DASHBOARD_FILE.write_text(" ".join(lines) + "\n")
 
 
 def load_custom_screens():
-    """Returns {"L2": [ {kind:"sensor",sensor,style,x,y,width} or
-    {kind:"image",path,x,y,width,height}, ... ], "L3": [...], ...}"""
-    config = {k: [] for k in CUSTOM_SCREEN_KEYS}
-    if not CUSTOM_SCREENS_FILE.exists():
-        return config
-    current = None
-    for line in CUSTOM_SCREENS_FILE.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("SCREEN "):
-            key = line.split(" ", 1)[1]
-            current = key if key in config else None
-        elif line.startswith("ELEMENT ") and current:
-            el = {
-                "kind": "sensor", "sensor": "", "style": "number",
-                "orientation": "horizontal", "x": 0, "y": 0,
-                "width": 40, "height": 28, "font_size": 0, "label": "", "format": "",
-            }
-            for tok in line[len("ELEMENT "):].split():
-                if "=" not in tok:
-                    continue
-                k, v = tok.split("=", 1)
-                if k in ("x", "y", "width", "height"):
-                    try:
-                        el[k] = int(v)
-                    except ValueError:
-                        pass
-                elif k == "font":
-                    try:
-                        el["font_size"] = int(v) if int(v) in (0, 1, 2, 3) else 0
-                    except ValueError:
-                        pass
-                elif k in ("sensor", "style", "orientation"):
-                    el[k] = v
-                elif k == "label":
-                    el[k] = v.replace("_", " ")
-                elif k == "label2":
-                    el["label"] = _decode_custom_screen_value(v)
-                elif k == "format" and v in {
-                    choice for choices in DATETIME_FORMAT_CHOICES.values()
-                    for choice, _ in choices
-                }:
-                    el[k] = v
-            if el["sensor"]:
-                el["sensor"] = LEGACY_SENSOR_ALIASES.get(el["sensor"], el["sensor"])
-                config[current].append(el)
-        elif line.startswith("IMAGE ") and current:
-            # "src" is optional and only present for images imported
-            # since drag-resize was added: a copy of the original
-            # source picture (not the already-downscaled/dithered
-            # .bin) kept alongside it so a resize can re-convert from
-            # real source quality instead of upscaling a 1-bit bitmap.
-            # Older IMAGE lines without src= parse fine -- src just
-            # stays absent, and those images fall back to no resize
-            # handle (same as today: re-import to change size).
-            im = {"kind": "image", "path": "", "x": 0, "y": 0, "width": 0, "height": 0, "src": None}
-            for tok in line[len("IMAGE "):].split():
-                if "=" not in tok:
-                    continue
-                k, v = tok.split("=", 1)
-                if k in ("x", "y", "width", "height"):
-                    try:
-                        im[k] = int(v)
-                    except ValueError:
-                        pass
-                elif k in ("path", "src"):
-                    im[k] = v
-            if im["path"] and im["width"] > 0 and im["height"] > 0:
-                config[current].append(im)
-        elif line.startswith("TEXT ") and current:
-            # Underscores decode to spaces -- matches g510_lcd_stats.c's
-            # own decoding exactly, keeps the space-delimited line
-            # parser on both sides simple (no quoted-string handling).
-            tx = {"kind": "text", "content": "", "x": 0, "y": 0, "font_size": 0}
-            for tok in line[len("TEXT "):].split():
-                if "=" not in tok:
-                    continue
-                k, v = tok.split("=", 1)
-                if k in ("x", "y"):
-                    try:
-                        tx[k] = int(v)
-                    except ValueError:
-                        pass
-                elif k == "font":
-                    try:
-                        tx["font_size"] = int(v) if int(v) in (0, 1, 2, 3) else 0
-                    except ValueError:
-                        pass
-                elif k == "content":
-                    tx[k] = v.replace("_", " ")
-                elif k == "content2":
-                    tx["content"] = _decode_custom_screen_value(v)
-            if tx["content"]:
-                config[current].append(tx)
-        elif line.startswith("VISUALIZER ") and current:
-            vz = {"kind": "visualizer", "x": 0, "y": 0, "width": 0, "height": 0}
-            for tok in line[len("VISUALIZER "):].split():
-                if "=" not in tok:
-                    continue
-                k, v = tok.split("=", 1)
-                if k in ("x", "y", "width", "height"):
-                    try:
-                        vz[k] = int(v)
-                    except ValueError:
-                        pass
-            if vz["width"] > 0 and vz["height"] > 0:
-                config[current].append(vz)
-    return config
+    return layout_store.load_custom_screens(CUSTOM_SCREENS_FILE, load_screens())
 
 
 def save_custom_screens(config):
-    lines = []
-    for key in CUSTOM_SCREEN_KEYS:
-        lines.append(f"SCREEN {key}")
-        for el in config[key]:
-            if el.get("kind") == "image":
-                src_part = f" src={el['src']}" if el.get("src") else ""
-                lines.append(
-                    f"IMAGE path={el['path']} width={el['width']} height={el['height']} "
-                    f"x={el['x']} y={el['y']}{src_part}"
-                )
-            elif el.get("kind") == "text":
-                content = _encode_custom_screen_value(el["content"]) or "%20"
-                lines.append(f"TEXT content2={content} x={el['x']} y={el['y']} font={el.get('font_size', 0)}")
-            elif el.get("kind") == "visualizer":
-                lines.append(f"VISUALIZER x={el['x']} y={el['y']} width={el['width']} height={el['height']}")
-            else:
-                width = el.get("width", 40)
-                orientation = el.get("orientation", "horizontal")
-                line = (
-                    f"ELEMENT sensor={el['sensor']} style={el['style']} "
-                    f"x={el['x']} y={el['y']} width={width} font={el.get('font_size', 0)}"
-                )
-                if el.get("label"):
-                    line += f" label2={_encode_custom_screen_value(el['label'])}"
-                if el.get("sensor") in DATETIME_FORMAT_CHOICES:
-                    date_format = el.get("format") or DATETIME_FORMAT_DEFAULTS[el["sensor"]]
-                    line += f" format={date_format}"
-                if orientation == "vertical" and el.get("style") == "bar":
-                    line += f" orientation=vertical height={el.get('height', 28)}"
-                lines.append(line)
-    CUSTOM_SCREENS_FILE.write_text("\n".join(lines) + "\n")
+    layout_store.save_custom_screens(config, CUSTOM_SCREENS_FILE)
 
 
-def _parse_bounds_meta(meta_path):
-    """Parses the .meta sidecar --preview writes alongside the image for
-    custom screens: real per-element pixel bounds computed with the
-    label font's actual glyph metrics, which Python has no way to
-    compute itself. Returns {index: {"label_x1":.., ..., "bar_x1":.. (bar
-    elements only)}}. Missing/unreadable file -> empty dict, callers
-    fall back to an approximation rather than crashing."""
-    bounds = {}
-    try:
-        text = meta_path.read_text()
-    except Exception:
-        return bounds
-    for line in text.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        try:
-            idx = int(parts[0])
-        except ValueError:
-            continue
-        entry = {}
-        for tok in parts[1:]:
-            if "=" not in tok:
-                continue
-            k, v = tok.split("=", 1)
-            try:
-                entry[k] = int(v)
-            except ValueError:
-                pass
-        bounds[idx] = entry
-    return bounds
+def load_game_dashboard_offsets():
+    return layout_store.load_game_dashboard_offsets(GAME_DASHBOARD_FILE)
+
+
+def save_game_dashboard_offsets(offsets):
+    layout_store.save_game_dashboard_offsets(offsets, GAME_DASHBOARD_FILE)
 
 
 def render_preview(screen_num, tag="app", editor=False):
-    """Runs the same C binary that draws the real LCD, in one-shot
-    --preview mode, and returns (QPixmap, bounds, err) -- the pixmap is
-    uses the same drawing code as the real screen. With editor=True,
-    the automatic L4 game dashboard also reports hitboxes for its
-    logo and temperature blocks, making those items draggable.
-    bounds is real per-element pixel geometry (see _parse_bounds_meta),
-    empty dict for non-custom screens or if the sidecar wasn't written.
-
-    `tag` picks the output file so independent callers (the Custom
-    Screens editor's own live preview, the canvas's LCD-mirror
-    thumbnail) never race on the same /tmp file -- two callers hitting
-    this at once with the same tag could still interleave a partial
-    read; distinct tags avoid that entirely rather than relying on
-    both finishing fast enough not to matter."""
-    if not STATS_BINARY.exists():
-        return None, {}, "Noch nicht gebaut – führe install.sh aus oder baue die C-Programme neu."
-    out_path = Path(f"/tmp/g510_app_preview_{tag}.ppm")
-    meta_path = Path(str(out_path) + ".meta")
-    try:
-        result = subprocess.run(
-            [
-                str(STATS_BINARY),
-                "--preview-editor" if editor else "--preview",
-                str(screen_num),
-                str(out_path),
-            ],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return None, {}, f"Vorschau-Rendering fehlgeschlagen: {result.stderr.strip()}"
-    except Exception as e:
-        return None, {}, f"Vorschau konnte nicht gestartet werden: {e}"
-
-    try:
-        data = out_path.read_bytes()
-    except Exception as e:
-        return None, {}, f"Vorschauausgabe konnte nicht gelesen werden: {e}"
-
-    # Minimal hand-rolled P6 PPM parser -- avoids depending on Qt's
-    # optional ppm plugin being present on whatever system this runs on.
-    if not data.startswith(b"P6"):
-        return None, {}, "Die Vorschauausgabe war kein gültiges PPM-Bild."
-    parts = data.split(b"\n", 3)
-    if len(parts) < 4:
-        return None, {}, "Ungültiger PPM-Header."
-    try:
-        w, h = (int(x) for x in parts[1].split())
-    except ValueError:
-        return None, {}, "Ungültiger PPM-Header."
-    pixels = parts[3]
-    img = QImage(w, h, QImage.Format_RGB888)
-    if len(pixels) < w * h * 3:
-        return None, {}, "PPM-Daten unvollständig."
-    for y in range(h):
-        row_start = y * w * 3
-        img.scanLine(y)  # ensure detach
-        for x in range(w):
-            i = row_start + x * 3
-            img.setPixel(x, y, (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2])
-    bounds = _parse_bounds_meta(meta_path)
-    return QPixmap.fromImage(img), bounds, None
-
-
-PREVIEW_SCALE = 4
-# Approximate click/drag hit box per element, in real LCD pixels (not
-# scaled) -- there's no exact per-element width/height available from
-# Python (the C renderer computes real text width using font metrics
-# Python doesn't have access to), so this is a deliberately generous
-# fixed size rather than pixel-perfect. Good enough to click and drag
-# elements that are reasonably spaced on a 160x43 screen.
-ELEMENT_HIT_W = 50
-ELEMENT_HIT_H = 10
-# Direct report: "the handle is always too small, or i cant find it"
-# -- was 5 (a 40x40 screen-px target at PREVIEW_SCALE=4), bumped up
-# for a meaningfully bigger, easier-to-land-on square, both visually
-# (easier to spot once hovering reveals it) and for the actual click
-# hit-test (same rect drives both).
-RESIZE_HANDLE_PX = 8   # half-size of the little resize square, in LCD px
-MIN_BAR_WIDTH = 10
-MAX_BAR_WIDTH = 140
-MIN_BAR_HEIGHT = 6
-MAX_BAR_HEIGHT = 40
-MIN_IMAGE_SIZE = 4     # smallest an image can be dragged down to, in LCD px
-
-
-class ScreenPreviewCanvas(QWidget):
-    """The live LCD preview, but interactive: click and drag an element
-    to move it, or drag its resize handle (bar elements only) to change
-    the bar's length -- both re-render the preview (throttled) as you
-    go, same underlying --preview mechanism as before, just wired to
-    mouse events instead of typed X/Y/width numbers."""
-    element_moved = pyqtSignal(int, int, int)   # index, new_x, new_y (LCD-space)
-    element_resized = pyqtSignal(int, int)        # index, new width or height (LCD-space)
-    image_resize_requested = pyqtSignal(int, int, int)  # index, target_width, target_height (LCD-space)
-    element_hovered = pyqtSignal(int)              # index, or -1 when no element is hovered
-    drag_started = pyqtSignal()
-    drag_finished = pyqtSignal()
-
-    def __init__(self):
-        super().__init__()
-        self._pixmap = None
-        self._elements = []
-        self._bounds = {}   # index -> real pixel geometry from the C renderer, see _parse_bounds_meta
-        self._drag_index = None
-        self._drag_offset = QPoint(0, 0)
-        self._resize_index = None
-        self._resize_kind = None  # "bar" or "image" -- which resize gesture is active
-        self._resize_start_x = 0
-        self._resize_start_width = 0
-        self._resize_start_y = 0
-        self._resize_start_height = 0
-        # Live target size while dragging an image's corner handle --
-        # separate from el["width"/"height"] on purpose: the actual
-        # bitmap only gets regenerated by a background ImageResizeWorker
-        # (see CustomScreensTab), so mutating the element's real size
-        # here would let the drawn dashed box (and then the next
-        # --preview render) claim a size the .bin file on disk doesn't
-        # have yet -- same class of bug the atomic tmp+rename write fix
-        # addressed on the C side, just on the Python/file side instead.
-        # This is purely the visual target for the dashed selection box
-        # while the real regeneration catches up in the background.
-        self._image_resize_preview_wh = None
-        self._hover_index = None
-        self.setFixedSize(LCD_WIDTH * PREVIEW_SCALE, LCD_HEIGHT * PREVIEW_SCALE)
-        self.setMouseTracking(True)
-        self.setCursor(Qt.ArrowCursor)
-
-    def set_data(self, pixmap, elements, bounds=None):
-        if self._elements is not elements and self._hover_index is not None:
-            self._hover_index = None
-            self.element_hovered.emit(-1)
-        self._pixmap = pixmap
-        self._elements = elements
-        self._bounds = bounds or {}
-        self.update()
-
-    def _element_rect(self, index):
-        el = self._elements[index]
-        if el.get("kind") == "game_dashboard":
-            b = self._bounds.get(el["bounds_index"], {})
-            x1, y1 = b.get("label_x1", el["x"]), b.get("label_y1", el["y"])
-            x2 = b.get("label_x2", x1 + 20)
-            y2 = b.get("label_y2", y1 + ELEMENT_HIT_H)
-            return QRect(
-                x1 * PREVIEW_SCALE, y1 * PREVIEW_SCALE,
-                max(1, x2 - x1) * PREVIEW_SCALE,
-                max(1, y2 - y1) * PREVIEW_SCALE,
-            )
-        if el.get("kind") in ("image", "visualizer"):
-            # Both kinds know their own exact size directly (image: set
-            # at import time by png-to-lcd.py; visualizer: just a plain
-            # x/y/width/height box, no font-metric unknown either) --
-            # no need for the C-reported .meta bounds sensor elements need.
-            return QRect(el["x"] * PREVIEW_SCALE, el["y"] * PREVIEW_SCALE,
-                         el["width"] * PREVIEW_SCALE, el["height"] * PREVIEW_SCALE)
-        if el.get("kind") == "text":
-            # Estimated box (TEXT_CHAR_PX per character) -- same
-            # category of approximation images already use, since
-            # there's no real font-metric measurement for freeform
-            # text (see on_add_text's docstring for why that's a
-            # deliberate scope decision, not an oversight). Scaled by
-            # FONT_SIZE_SCALE's real measured width/height ratios so a
-            # Medium/Large/Huge text field's hit-box roughly tracks its
-            # actual larger size instead of staying stuck at Small's.
-            w_ratio, h_ratio = FONT_SIZE_SCALE.get(el.get("font_size", 0), (1.0, 1.0))
-            est_w = max(20, round(len(el["content"]) * TEXT_CHAR_PX * w_ratio))
-            est_h = round(ELEMENT_HIT_H * h_ratio)
-            return QRect(el["x"] * PREVIEW_SCALE, el["y"] * PREVIEW_SCALE,
-                         est_w * PREVIEW_SCALE, est_h * PREVIEW_SCALE)
-        b = self._bounds.get(self._sensor_rank(index))
-        if b and "label_x1" in b:
-            # Real geometry: covers the label through the real end of
-            # the VALUE TEXT (which for bar-style is drawn AFTER the
-            # bar, not the bar's own edge) -- direct report: "the blue
-            # bars... dont contain the whole variable element(name)".
-            # value_x2 is a REAL measured width from the C side (see
-            # measure_builtin_text_width() in g510_lcd_stats.c) -- the
-            # old code used bar_x2 (missing bar-style's own trailing
-            # value text entirely) or a fixed "+30" guess for
-            # number-style, which badly undershot real long values
-            # like a song title. Falls back to the old guess only if
-            # value_x2 is somehow missing (e.g. a stale .meta from
-            # before this field existed).
-            x1, y1 = b["label_x1"], b["label_y1"]
-            x2 = b.get("value_x2", b["label_x2"] + 30)
-            y2 = max(b["label_y2"], b.get("bar_y2", 0))
-            # Leeres Label (Time/Date): Breite/Hoehe 0 -> Mindestgroesse
-            x2 = max(x2, x1 + 20)
-            y2 = max(y2, y1 + ELEMENT_HIT_H)
-            return QRect(x1 * PREVIEW_SCALE, y1 * PREVIEW_SCALE,
-                         (x2 - x1) * PREVIEW_SCALE, (y2 - y1) * PREVIEW_SCALE)
-        # Fallback for the brief window before the first real preview
-        # has come back (or if the metadata sidecar is ever missing) --
-        # approximate, not pixel-accurate, but never crashes.
-        return QRect(
-            el["x"] * PREVIEW_SCALE, el["y"] * PREVIEW_SCALE,
-            ELEMENT_HIT_W * PREVIEW_SCALE, ELEMENT_HIT_H * PREVIEW_SCALE,
-        )
-
-    def _sensor_rank(self, index):
-        """Real bug found by self-audit: g510_lcd_stats.c's --preview
-        mode draws sensors, images, and text in three SEPARATE loops
-        (see draw_custom_screen()), each with its own counter -- the
-        .meta bounds sidecar's indices are therefore a sensor's rank
-        among SENSOR elements only (0, 1, 2...), not its position in
-        this combined sensor+image+text list. Looking bounds up by the
-        raw combined index silently returns wrong (or missing) data for
-        any sensor that has a text/image element before it in the list
-        -- confirmed by building a sensor+image+sensor screen and
-        diffing the returned rect against the real C-measured bounds
-        directly, not assumed. This computes the correct lookup key."""
-        return sum(1 for e in self._elements[:index] if e.get("kind", "sensor") == "sensor")
-
-    def _resize_handle_rect(self, index):
-        el = self._elements[index]
-        b = self._bounds.get(self._sensor_rank(index))
-        r = RESIZE_HANDLE_PX * PREVIEW_SCALE
-        if el.get("kind") in ("image", "visualizer"):
-            # Bottom-right corner of the element's own known box -- no
-            # font-metric guess needed here (same reasoning as
-            # _element_rect's image/visualizer case above).
-            hx = (el["x"] + el["width"]) * PREVIEW_SCALE
-            hy = (el["y"] + el["height"]) * PREVIEW_SCALE
-            return QRect(hx - r, hy - r, r * 2, r * 2)
-        if b and "bar_x2" in b:
-            if b.get("vertical", 0):
-                hx = ((b["bar_x1"] + b["bar_x2"]) * PREVIEW_SCALE) // 2
-                hy = b["bar_y2"] * PREVIEW_SCALE
-                return QRect(hx - r, hy - r, r * 2, r * 2)
-            # Exactly where the real bar ends -- this is the fix for
-            # the handle drifting away from the actual bar, reported
-            # directly as the preview being "hard to control."
-            hx = b["bar_x2"] * PREVIEW_SCALE
-            hy = ((b["bar_y1"] + b["bar_y2"]) * PREVIEW_SCALE) // 2
-            return QRect(hx - r, hy - r, r * 2, r * 2)
-        hx = el["x"] * PREVIEW_SCALE + ELEMENT_HIT_W * PREVIEW_SCALE
-        hy = el["y"] * PREVIEW_SCALE + (ELEMENT_HIT_H * PREVIEW_SCALE) // 2
-        return QRect(hx - r, hy - r, r * 2, r * 2)
-
-    def _element_at(self, pos):
-        # Last element in the list is drawn/added most recently -- check
-        # in reverse so an overlapping newer element wins, matching what
-        # you'd visually expect to grab.
-        for i in range(len(self._elements) - 1, -1, -1):
-            if self._element_rect(i).contains(pos):
-                return i
-        return None
-
-    def _resizable(self, el):
-        if el.get("style") == "bar":
-            return True
-        if el.get("kind") == "visualizer":
-            # Always resizable -- just a plain box, no re-conversion
-            # from a source file needed the way images require.
-            return True
-        # Only images imported since drag-resize was added carry a
-        # "src" (a kept copy of the real source picture) -- an older
-        # image element has none, and re-converting from its own
-        # already-downscaled 1-bit .bin would just upscale a dithered
-        # bitmap into something worse, not a real resize. No handle
-        # offered for those; re-importing still works as before.
-        return el.get("kind") == "image" and bool(el.get("src"))
-
-    def _resize_handle_at(self, pos):
-        for i in range(len(self._elements) - 1, -1, -1):
-            el = self._elements[i]
-            if self._resizable(el) and self._resize_handle_rect(i).contains(pos):
-                return i
-        return None
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        if self._pixmap is not None:
-            painter.drawPixmap(0, 0, self._pixmap)
-        # Only the bar you're actively resizing, or the one you're
-        # currently hovering near, gets its handle drawn -- showing
-        # every bar's handle at once (the original approach) cluttered
-        # a screen this small badly enough to be reported directly as
-        # confusing ("wtf are the blue squares for?").
-        handle_owner = self._resize_index if self._resize_index is not None else self._hover_index
-        if handle_owner is not None and 0 <= handle_owner < len(self._elements) \
-                and self._resizable(self._elements[handle_owner]):
-            painter.setPen(QPen(QColor(120, 120, 120), 1))
-            painter.setBrush(QColor(70, 140, 230, 180))
-            painter.drawRect(self._resize_handle_rect(handle_owner))
-        active = self._drag_index if self._drag_index is not None else self._resize_index
-        if self._hover_index is not None and active is None:
-            painter.setPen(QPen(QColor(255, 190, 40), 2, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(self._element_rect(self._hover_index))
-        if active is not None:
-            painter.setPen(QPen(QColor(70, 140, 230), 2, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            if self._resize_kind == "image" and self._image_resize_preview_wh:
-                el = self._elements[active]
-                w, h = self._image_resize_preview_wh
-                rect = QRect(el["x"] * PREVIEW_SCALE, el["y"] * PREVIEW_SCALE,
-                             w * PREVIEW_SCALE, h * PREVIEW_SCALE)
-            else:
-                rect = self._element_rect(active)
-            painter.drawRect(rect)
-
-    def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        r_idx = self._resize_handle_at(event.pos())
-        if r_idx is not None:
-            el = self._elements[r_idx]
-            self._resize_index = r_idx
-            if el.get("kind") == "image":
-                self._resize_kind = "image"
-                self._image_resize_preview_wh = (el["width"], el["height"])
-            elif el.get("kind") == "visualizer":
-                # Unlike an image, no subprocess/re-conversion is ever
-                # needed to change a visualizer's box size -- resize is
-                # a cheap, direct, synchronous width/height update.
-                self._resize_kind = "visualizer"
-            elif el.get("orientation") == "vertical":
-                self._resize_kind = "vbar"
-                self._resize_start_y = event.pos().y()
-                self._resize_start_height = el.get("height", 28)
-            else:
-                self._resize_kind = "bar"
-                self._resize_start_x = event.pos().x()
-                self._resize_start_width = el.get("width", 40)
-            self.update()
-            self.drag_started.emit()
-            return
-        idx = self._element_at(event.pos())
-        if idx is None:
-            return
-        self._drag_index = idx
-        el = self._elements[idx]
-        el_pos = QPoint(el["x"] * PREVIEW_SCALE, el["y"] * PREVIEW_SCALE)
-        self._drag_offset = event.pos() - el_pos
-        self.update()
-        self.drag_started.emit()
-
-    def mouseMoveEvent(self, event):
-        if self._resize_index is not None and self._resize_kind == "image":
-            self.setCursor(Qt.SizeFDiagCursor)
-            el = self._elements[self._resize_index]
-            target_w = round(event.pos().x() / PREVIEW_SCALE) - el["x"]
-            target_h = round(event.pos().y() / PREVIEW_SCALE) - el["y"]
-            target_w = max(MIN_IMAGE_SIZE, min(LCD_WIDTH - el["x"], target_w))
-            target_h = max(MIN_IMAGE_SIZE, min(LCD_HEIGHT - el["y"], target_h))
-            if self._image_resize_preview_wh != (target_w, target_h):
-                self._image_resize_preview_wh = (target_w, target_h)
-                self.image_resize_requested.emit(self._resize_index, target_w, target_h)
-            self.update()
-            return
-
-        if self._resize_index is not None and self._resize_kind == "visualizer":
-            self.setCursor(Qt.SizeFDiagCursor)
-            el = self._elements[self._resize_index]
-            target_w = round(event.pos().x() / PREVIEW_SCALE) - el["x"]
-            target_h = round(event.pos().y() / PREVIEW_SCALE) - el["y"]
-            target_w = max(MIN_IMAGE_SIZE, min(LCD_WIDTH - el["x"], target_w))
-            target_h = max(MIN_IMAGE_SIZE, min(LCD_HEIGHT - el["y"], target_h))
-            if el["width"] != target_w or el["height"] != target_h:
-                el["width"], el["height"] = target_w, target_h
-                self.element_resized.emit(self._resize_index, target_w)
-            self.update()
-            return
-
-        if self._resize_index is not None and self._resize_kind == "vbar":
-            self.setCursor(Qt.SizeVerCursor)
-            delta = round((event.pos().y() - self._resize_start_y) / PREVIEW_SCALE)
-            el = self._elements[self._resize_index]
-            max_height = min(MAX_BAR_HEIGHT, LCD_HEIGHT - el["y"])
-            new_height = max(min(MIN_BAR_HEIGHT, max_height),
-                             min(max_height, self._resize_start_height + delta))
-            if el.get("height", 28) != new_height:
-                el["height"] = new_height
-                self.element_resized.emit(self._resize_index, new_height)
-            self.update()
-            return
-
-        if self._resize_index is not None:
-            self.setCursor(Qt.SizeHorCursor)
-            delta = round((event.pos().x() - self._resize_start_x) / PREVIEW_SCALE)
-            new_width = max(MIN_BAR_WIDTH, min(MAX_BAR_WIDTH, self._resize_start_width + delta))
-            el = self._elements[self._resize_index]
-            if el.get("width", 40) != new_width:
-                el["width"] = new_width
-                self.element_resized.emit(self._resize_index, new_width)
-            self.update()
-            return
-
-        if self._drag_index is None:
-            idx = self._element_at(event.pos())
-            over_handle = self._resize_handle_at(event.pos()) is not None
-            new_hover = idx
-            if new_hover != self._hover_index:
-                self._hover_index = new_hover
-                self.element_hovered.emit(-1 if new_hover is None else new_hover)
-                self.update()
-            if over_handle:
-                is_image = idx is not None and self._elements[idx].get("kind") == "image"
-                is_vertical = idx is not None and self._elements[idx].get("orientation") == "vertical"
-                self.setCursor(Qt.SizeFDiagCursor if is_image else (Qt.SizeVerCursor if is_vertical else Qt.SizeHorCursor))
-            elif idx is not None:
-                self.setCursor(Qt.OpenHandCursor)
-            else:
-                self.setCursor(Qt.ArrowCursor)
-            return
-        self.setCursor(Qt.ClosedHandCursor)
-        new_pos = event.pos() - self._drag_offset
-        # Real bug found by self-audit, and it matches a direct report
-        # ("elements still overflow under the screen where i cant take
-        # out of"): this clamp only ever bounded the element's TOP-LEFT
-        # corner to the visible screen, never its actual size -- so an
-        # element could be dragged until most of its real content hung
-        # off the bottom/right edge, at which point its now off-screen
-        # hit-box made it hard or impossible to grab back. Measures the
-        # element's real current size (via _element_rect, which already
-        # has the fixed sensor-rank bounds lookup) and clamps so its
-        # FAR edge can never leave the visible 160x43 screen either.
-        rect = self._element_rect(self._drag_index)
-        w_lcd = max(1, round(rect.width() / PREVIEW_SCALE))
-        h_lcd = max(1, round(rect.height() / PREVIEW_SCALE))
-        x = max(0, min(LCD_WIDTH - w_lcd, round(new_pos.x() / PREVIEW_SCALE)))
-        y = max(0, min(LCD_HEIGHT - h_lcd, round(new_pos.y() / PREVIEW_SCALE)))
-        el = self._elements[self._drag_index]
-        if el["x"] != x or el["y"] != y:
-            el["x"], el["y"] = x, y
-            self.element_moved.emit(self._drag_index, x, y)
-        self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        if self._resize_index is not None:
-            self._resize_index = None
-            self._resize_kind = None
-            self._image_resize_preview_wh = None
-            self.setCursor(Qt.ArrowCursor)
-            self.update()
-            self.drag_finished.emit()
-            return
-        if self._drag_index is None:
-            return
-        self._drag_index = None
-        self.setCursor(Qt.ArrowCursor)
-        self.update()
-        self.drag_finished.emit()
-
-    def leaveEvent(self, event):
-        if self._hover_index is not None:
-            self._hover_index = None
-            self.element_hovered.emit(-1)
-            self.update()
+    return preview_renderer.render_preview(STATS_BINARY, screen_num, tag, editor)
 
 
 class ImageResizeWorker(QThread):
@@ -1779,11 +799,13 @@ class ImageResizeWorker(QThread):
 
 
 class CustomScreensTab(QWidget):
-    """AIDA64-style dashboard builder for the L2-L5 buttons. Pick a
+    """AIDA64-style dashboard builder for LCD screens. Pick a
     screen, add sensors with a display style, drag them into place on
     the live preview -- the preview is the real LCD-drawing code
     running in a one-shot mode, so what you see here is exactly what
     the keyboard will show."""
+    screens_changed = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.current_screen = "L2"
@@ -1799,46 +821,63 @@ class CustomScreensTab(QWidget):
         canvas_col = QVBoxLayout()
         canvas_col.setSpacing(12)
 
-        self.screen_buttons = {}
-        screen_names = {
-            "L1": "L1\nStandard",
-            "L2": "L2\nSystem",
-            "L3": "L3\nMedia Center",
-            "L4": "L4\nSpiele",
-            "L5": "L5\nNetzwerk",
-        }
-        button_style = (
-            "QPushButton { font-weight: bold; padding: 6px 4px; text-align: center;"
-            " background-color: #2b2e33; border: 1px solid #555; border-radius: 6px; }"
-            "QPushButton:hover { background-color: #3a3e45; }"
-            "QPushButton:checked { background-color: #4a90d9; color: white; border-color: #8fc0f0; }"
-        )
-        for key in SCREEN_PREVIEW_KEYS:
-            btn = QPushButton(screen_names[key])
-            btn.setCheckable(True)
-            btn.setToolTip("L1 ist der feste Standardbildschirm (Uhr) – er kann nicht verändert werden, nur ansehen" if key == "L1" else f"Bildschirm {key} bearbeiten – wird mit der Taste {key} auf der Tastatur angezeigt")
-            btn.setStyleSheet(button_style)
-            btn.setMinimumHeight(46)
-            btn.clicked.connect(lambda _, k=key: self.select_screen(k))
-            self.screen_buttons[key] = btn
-        self.screen_buttons["L2"].setChecked(True)
-        # Wie am echten Gerät: L1 links neben dem Display, L2–L5 darunter.
+        selector_row = QHBoxLayout()
+        self.screen_combo = QComboBox()
+        self.screen_combo.setMinimumWidth(180)
+        self.screen_combo.setToolTip("Bildschirm im Editor und auf der Tastatur auswählen")
+        self.screen_combo.activated.connect(
+            lambda: self.select_screen(self.screen_combo.currentData()))
+        selector_row.addWidget(self.screen_combo, 1)
+        canvas_col.addLayout(selector_row)
+        management_row = QHBoxLayout()
+        new_screen = QPushButton("Neuer Screen…")
+        new_screen.clicked.connect(self.add_screen)
+        management_row.addWidget(new_screen)
+        self.rename_screen_btn = QPushButton("Umbenennen…")
+        self.rename_screen_btn.clicked.connect(self.rename_screen)
+        management_row.addWidget(self.rename_screen_btn)
+        self.delete_screen_btn = QPushButton("Löschen…")
+        self.delete_screen_btn.clicked.connect(self.delete_screen)
+        management_row.addWidget(self.delete_screen_btn)
+        self.refresh_screen_choices()
+        canvas_col.addLayout(management_row)
+        self.clock_layout_row = QWidget()
+        clock_row = QHBoxLayout(self.clock_layout_row)
+        clock_row.setContentsMargins(0, 0, 0, 0)
+        clock_row.addWidget(QLabel("Uhr-Design:"))
+        previous_clock = QPushButton("Zurück")
+        previous_clock.clicked.connect(lambda: self.cycle_clock_layout(-1))
+        clock_row.addWidget(previous_clock)
+        self.clock_layout_combo = QComboBox()
+        for index, name in enumerate(CLOCK_LAYOUTS):
+            self.clock_layout_combo.addItem(f"{index + 1:02d} / {len(CLOCK_LAYOUTS)} · {name}", index)
+        self.clock_layout_combo.activated.connect(self.on_clock_layout_selected)
+        clock_row.addWidget(self.clock_layout_combo, 1)
+        next_clock = QPushButton("Weiter")
+        next_clock.clicked.connect(lambda: self.cycle_clock_layout(1))
+        clock_row.addWidget(next_clock)
+        self.clock_layout_row.hide()
+        canvas_col.addWidget(self.clock_layout_row)
         device_grid = QGridLayout()
         device_grid.setHorizontalSpacing(12)
         device_grid.setVerticalSpacing(10)
-        self.screen_buttons["L1"].setFixedWidth(96)
-        self.screen_buttons["L1"].setMinimumHeight(60)
-        device_grid.addWidget(self.screen_buttons["L1"], 0, 0, Qt.AlignVCenter)
+        cycle_button = QPushButton("L1\nWeiter")
+        cycle_button.setFixedWidth(96)
+        cycle_button.setMinimumHeight(60)
+        cycle_button.clicked.connect(self.cycle_preview)
+        cycle_button.setToolTip("Nächsten Bildschirm im Editor und auf dem LCD anzeigen.")
+        device_grid.addWidget(cycle_button, 0, 0, Qt.AlignVCenter)
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(10)
+        self.function_buttons = {}
         for key in ("L2", "L3", "L4", "L5"):
-            buttons_row.addWidget(self.screen_buttons[key])
+            button = QPushButton(key)
+            button.setEnabled(False)
+            button.setMinimumHeight(46)
+            buttons_row.addWidget(button)
+            self.function_buttons[key] = button
 
-        # Live, interactive preview -- scaled up 4x (160x43 -> 640x172)
-        # so it's actually readable, tinted to match the real
-        # green-on-black LCD. Elements are click-and-drag movable
-        # directly on this; bar elements also get a small drag handle
-        # to resize their length.
+        # Painting and hit testing share the same aspect-preserving transform.
         self.preview_canvas = ScreenPreviewCanvas()
         self.preview_canvas.element_moved.connect(self.on_element_dragged)
         self.preview_canvas.element_resized.connect(self.on_element_resized)
@@ -1864,11 +903,11 @@ class CustomScreensTab(QWidget):
         self._image_resize_next = None
         self._image_resize_screen = None
         self._image_resize_el = None
-        canvas_col.addStretch(1)
         device_grid.addWidget(self.preview_canvas, 0, 1)
         device_grid.addLayout(buttons_row, 1, 1)
         device_grid.setColumnStretch(1, 1)
-        canvas_col.addLayout(device_grid)
+        device_grid.setRowStretch(0, 1)
+        canvas_col.addLayout(device_grid, 1)
 
         self.drag_hint = QLabel(
             "Alles per Ziehen verschieben. Mit der Maus über einen Balken oder ein frisch "
@@ -1877,7 +916,6 @@ class CustomScreensTab(QWidget):
         self.drag_hint.setWordWrap(True)
         self.drag_hint.setObjectName("Status")
         canvas_col.addWidget(self.drag_hint)
-        canvas_col.addStretch(1)
         root.addLayout(canvas_col, stretch=1)
 
         panel = QWidget()
@@ -1910,9 +948,11 @@ class CustomScreensTab(QWidget):
         panel_layout.addWidget(self.sensor_desc_label)
 
         self.style_combo = QComboBox()
-        self.style_combo.setToolTip("Zahl: zeigt den Rohwert als Text. Balken: ein gefüllter Fortschrittsbalken (für Prozentwerte, Temperaturen oder Medien mit bekannter Dauer)")
+        self.style_combo.setToolTip("Zahl: Rohwert als Text. Balken: Prozentwerte/Temperaturen. Verlauf: letzte 60 Messwerte für Netzwerk-Download oder -Upload.")
         self.style_combo.addItem("Zahl", "number")
         self.style_combo.addItem("Balken", "bar")
+        self.style_combo.addItem("Verlauf", "history")
+        self.style_combo.addItem("Füllbalken mit Wert", "gauge")
         self.style_combo.currentIndexChanged.connect(self.on_style_changed)
 
         self.orientation_label = QLabel("Balkenausrichtung:")
@@ -1946,7 +986,6 @@ class CustomScreensTab(QWidget):
         orientation_row.addWidget(self.orientation_label)
         orientation_row.addWidget(self.orientation_combo, stretch=1)
         panel_layout.addLayout(orientation_row)
-        self.on_style_changed()  # style_combo starts on "Number" -- sync Large/Huge availability now
 
         self.bar_hint_label = QLabel(
             "Für diesen Sensor gibt es keine sinnvolle 0–100-Skala – wird als Zahl angezeigt."
@@ -1970,7 +1009,7 @@ class CustomScreensTab(QWidget):
         self.layout_preset_combo.addItem("CPU-/GPU-Auslastung", "performance")
         self.layout_preset_combo.addItem("Temperaturübersicht", "temperatures")
         self.layout_preset_combo.addItem("Systemübersicht", "system")
-        self.layout_preset_combo.addItem("Netzwerk, Laufwerke und Uhr", "network")
+        self.layout_preset_combo.addItem(PRESET_NAMES["network"], "network")
         self.layout_preset_combo.addItem("Medienwiedergabe", "media")
         self.layout_preset_combo.setToolTip("Wähle eine fertige Vorlage für den ausgewählten LCD-Bildschirm.")
         panel_layout.addWidget(self.layout_preset_combo)
@@ -1983,10 +1022,11 @@ class CustomScreensTab(QWidget):
         self.apply_layout_btn.clicked.connect(self.on_apply_layout_preset)
         panel_layout.addWidget(self.apply_layout_btn)
 
-        self.apply_default_btn = QPushButton("Standardbelegung L2–L5")
+        self.apply_default_btn = QPushButton("Standardlayouts wiederherstellen")
         self.apply_default_btn.setObjectName("PanelButton")
         self.apply_default_btn.setToolTip(
-            "L2 Systemübersicht, L3 Medien, L4 Temperaturen, L5 Netzwerk/Uhr.")
+            "Systemübersicht, Medien, Temperaturen und Netzwerkverbindung. "
+            "Die Funktionstastenbelegung bleibt unverändert.")
         self.apply_default_btn.clicked.connect(self.on_apply_default_layout)
         panel_layout.addWidget(self.apply_default_btn)
 
@@ -2029,6 +1069,11 @@ class CustomScreensTab(QWidget):
         self.add_text_btn.setObjectName("PanelButton")
         self.add_text_btn.clicked.connect(self.on_add_text)
         panel_layout.addWidget(self.add_text_btn)
+
+        self.add_frame_btn = QPushButton("Rahmen hinzufügen")
+        self.add_frame_btn.setObjectName("PanelButton")
+        self.add_frame_btn.clicked.connect(self.on_add_frame)
+        panel_layout.addWidget(self.add_frame_btn)
 
         self.add_visualizer_btn = QPushButton("Visualizer hinzufügen")
         self.add_visualizer_btn.setObjectName("PanelButton")
@@ -2103,41 +1148,152 @@ class CustomScreensTab(QWidget):
         self.drag_refresh_timer.timeout.connect(self.refresh_preview)
 
     def showEvent(self, event):
-        # Real inefficiency found via direct audit (user: "figure out
-        # why it takes so much RAM"): preview_timer used to run every
-        # 1s FOREVER once this tab was built, spawning a subprocess and
-        # re-rendering a PPM preview even while the Backlight + G-Keys
-        # tab was the one actually visible. Qt fires showEvent/hideEvent
-        # on a QTabWidget page precisely when it becomes the active/
-        # inactive tab -- the natural hook to only do this work while
-        # someone can actually see it. (This wasn't the GUI's main RAM
-        # cost -- that's normal PyQt5/Qt baseline overhead, confirmed
-        # stable, not leaking -- but it's real wasted CPU/subprocess
-        # churn fixed for free while auditing.)
+        # Only render while this page is visible.
         super().showEvent(event)
         self.preview_timer.start(1000)
+        self.refresh_function_buttons()
         self.refresh_preview()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.preview_timer.stop()
 
+    def refresh_screen_choices(self):
+        screens = load_screens()
+        self.screen_combo.clear()
+        for number, name in screens.items():
+            self.screen_combo.addItem(name, f"L{number}")
+        self.screen_combo.setCurrentIndex(self.screen_combo.findData(self.current_screen))
+        custom = int(self.current_screen[1:]) >= 6
+        self.rename_screen_btn.setEnabled(custom)
+        self.delete_screen_btn.setEnabled(custom)
+
+    def request_screen_name(self, title, initial=""):
+        name, accepted = QInputDialog.getText(self, title, "Name des Bildschirms:",
+                                             text=initial)
+        if not accepted:
+            return None
+        name = name.strip()
+        if not name or any(ord(character) < 32 for character in name):
+            raise ValueError("Bitte einen nicht leeren Namen ohne Steuerzeichen eingeben.")
+        existing = load_screens()
+        if any(name.casefold() == value.casefold() for number, value in existing.items()
+               if initial == "" or number != self.screen_number()):
+            raise ValueError("Dieser Bildschirmname ist bereits vergeben.")
+        return name
+
+    def add_screen(self):
+        try:
+            name = self.request_screen_name("Neuer Bildschirm")
+            if name is None:
+                return
+            catalog = load_screen_catalog()
+            number = catalog["next_id"]
+            if number > 2147483647:
+                raise ValueError("Der technische ID-Wertebereich ist ausgeschöpft.")
+            key = f"L{number}"
+            while key in self.config:
+                number += 1
+                key = f"L{number}"
+                if number > 2147483647:
+                    raise ValueError("Der technische ID-Wertebereich ist ausgeschöpft.")
+            updated = {**self.config, key: []}
+            save_custom_screens(updated)
+            catalog["screens"].append({"id": number, "name": name})
+            catalog["next_id"] = number + 1
+            try:
+                save_screen_catalog(catalog)
+            except OSError:
+                save_custom_screens(self.config)
+                raise
+            self.config = updated
+            self.refresh_screen_choices()
+            self.screens_changed.emit()
+            self.select_screen(key)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Bildschirm anlegen", str(error))
+
+    def rename_screen(self):
+        if self.screen_number() < 6:
+            return
+        try:
+            name = self.request_screen_name("Bildschirm umbenennen",
+                                            load_screens()[self.screen_number()])
+            if name is None:
+                return
+            catalog = load_screen_catalog()
+            for entry in catalog["screens"]:
+                if entry["id"] == self.screen_number():
+                    entry["name"] = name
+            save_screen_catalog(catalog)
+            self.refresh_screen_choices()
+            self.refresh_function_buttons()
+            self.screens_changed.emit()
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Bildschirm umbenennen", str(error))
+
+    def delete_screen(self):
+        number = self.screen_number()
+        if number < 6:
+            return
+        try:
+            name = load_screens()[number]
+            if QMessageBox.question(
+                    self, "Bildschirm löschen",
+                    f"„{name}“ und seine Layoutelemente wirklich löschen?\n"
+                    "Tastenverweise auf diesen Screen werden unbelegt.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                return
+            # Move off the deleted screen before removing its layout.
+            if read_screen() == number:
+                show_screen(2)
+            old_catalog = load_screen_catalog()
+            catalog = {**old_catalog, "screens": [
+                entry for entry in old_catalog["screens"] if entry["id"] != number]}
+            save_screen_catalog(catalog)
+            updated = {key: value for key, value in self.config.items()
+                       if key != self.current_screen}
+            try:
+                save_custom_screens(updated)
+            except OSError:
+                save_screen_catalog(old_catalog)
+                raise
+            self.config = updated
+            self.current_screen = "L2"
+            self.refresh_screen_choices()
+            self.screens_changed.emit()
+            self.select_screen("L2")
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Bildschirm löschen", str(error))
+
     def select_screen(self, key):
         self.current_screen = key
+        self.clock_layout_row.setVisible(key == "L1")
+        self.refresh_function_buttons()
         self.drag_hint.setText(
             "Während ein Spiel läuft, Logo/Titel oder CPU-/GPU-Block in der Vorschau ziehen, "
-            "um das automatische L4-Spieldashboard zu positionieren."
+            "um das automatische Spieldashboard zu positionieren."
             if key == "L4" else
-            "L3 zeigt automatisch das Media Center (Symbol, Laufschrift, Fortschritt, Spektrum), "
+            "Das Media Center zeigt automatisch Symbol, Laufschrift, Fortschritt und Spektrum, "
             "solange hier keine eigenen Elemente liegen. Eigene Elemente ersetzen diese Ansicht."
             if key == "L3" else
+            "Netzwerk: Die beiden Verläufe zeigen je 60 Messwerte mit eigener automatischer "
+            "Höhenskala. Verlauf zum Verschieben ziehen, an der Ecke skalieren."
+            if key == "L5" else
+            "20 Uhr-Designs: Auswahl oben oder auf der Tastatur mit L2 zurück / L3 weiter "
+            "(Standardbelegung). Die Auswahl bleibt gespeichert."
+            if key == "L1" else
             "Alles per Ziehen verschieben. Mit der Maus über einen Balken oder ein frisch "
             "importiertes Bild fahren, um den Größengriff anzuzeigen."
         )
-        for k, btn in self.screen_buttons.items():
-            btn.setChecked(k == key)
+        index = self.screen_combo.findData(key)
+        if index >= 0:
+            self.screen_combo.setCurrentIndex(index)
+        self.rename_screen_btn.setEnabled(int(key[1:]) >= 6)
+        self.delete_screen_btn.setEnabled(int(key[1:]) >= 6)
         editable = key != "L1"
-        l1_reason = "L1 ist die eingebaute Uhr – sie lässt sich nicht bearbeiten." if not editable else ""
+        l1_reason = "Die eingebaute Uhr lässt sich nicht bearbeiten." if not editable else ""
         self.sensor_combo.setEnabled(editable)
         self.sensor_combo.setToolTip(l1_reason)
         self.style_combo.setEnabled(editable)
@@ -2153,20 +1309,62 @@ class CustomScreensTab(QWidget):
         self.import_image_btn.setToolTip(l1_reason)
         self.add_text_btn.setEnabled(editable)
         self.add_text_btn.setToolTip(l1_reason)
+        self.add_frame_btn.setEnabled(editable)
+        self.add_frame_btn.setToolTip(l1_reason if not editable else "Rahmen am Rand verschieben oder an der Ecke skalieren.")
         self.add_visualizer_btn.setEnabled(editable)
         self.add_visualizer_btn.setToolTip(
             l1_reason if not editable else
             "Ein Live-Audio-Balkenvisualizer – reagiert auf alles, was gerade "
             "auf diesem PC läuft (jeder Player: Brave, Spotify, VLC usw.)."
         )
+        self.on_style_changed()
         self.refresh_elements_list()
         self.refresh_preview()
+        try:
+            self.apply_selected_screen()
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Bildschirmwechsel fehlgeschlagen", str(error))
+
+    def apply_selected_screen(self):
+        screen = self.screen_number()
+        show_screen(screen)
+        if read_screen() != screen:
+            raise OSError("Die Bildschirmwahl konnte nicht bestätigt werden.")
+        return load_screens()[self.screen_number()]
+
+    def cycle_preview(self):
+        current = 1 if self.current_screen == "L1" else int(self.current_screen[1:])
+        screen = next_screen(current)
+        self.select_screen("L1" if screen == 1 else f"L{screen}")
+
+    def refresh_function_buttons(self):
+        screen = "1" if self.current_screen == "L1" else self.current_screen[1:]
+        try:
+            bindings = load_bindings()
+            labels = action_labels()
+        except (OSError, ValueError) as error:
+            for key, button in self.function_buttons.items():
+                button.setText(f"{key}\nBelegungsfehler")
+                button.setToolTip(str(error))
+            return
+        for key, button in self.function_buttons.items():
+            button.setText(f"{key}\n{labels[bindings[screen][key]]}")
+            button.setToolTip("Belegung unter „LCD-Tasten“ ändern. Hier nur Vorschau.")
 
     def on_sensor_changed(self):
         sensor_key = self.sensor_combo.currentData()
         capable = sensor_key in BAR_CAPABLE_SENSORS
         self.bar_hint_label.setVisible(not capable)
         self.sensor_desc_label.setText(SENSOR_DESCRIPTIONS.get(sensor_key, ""))
+        history_index = self.style_combo.findData("history")
+        history_capable = sensor_key in ("NET_DOWN", "NET_UP")
+        self.style_combo.model().item(history_index).setEnabled(history_capable)
+        if not history_capable and self.style_combo.currentData() == "history":
+            self.style_combo.setCurrentIndex(self.style_combo.findData("number"))
+        self.style_combo.model().item(self.style_combo.findData("gauge")).setEnabled(capable)
+        if not capable and self.style_combo.currentData() == "gauge":
+            self.style_combo.setCurrentIndex(self.style_combo.findData("number"))
+        self.on_style_changed()
 
     def on_style_changed(self):
         # Self-audit finding: Large/Huge next to a bar looks visually
@@ -2175,6 +1373,9 @@ class CustomScreensTab(QWidget):
         # capping whatever you picked -- so what's shown always matches
         # what you'll actually get.
         is_bar = self.style_combo.currentData() == "bar"
+        self.bar_hint_label.setVisible(
+            self.sensor_combo.currentData() not in BAR_CAPABLE_SENSORS
+            and self.style_combo.currentData() != "history")
         model = self.font_size_combo.model()
         for value, _ in FONT_SIZE_CHOICES:
             item = model.item(value)
@@ -2182,41 +1383,24 @@ class CustomScreensTab(QWidget):
         if is_bar and self.font_size_combo.currentData() > MAX_BAR_FONT_SIZE:
             self.font_size_combo.setCurrentIndex(MAX_BAR_FONT_SIZE)
         editable = self.current_screen != "L1"
+        self.font_size_combo.setEnabled(editable and self.style_combo.currentData() not in ("history", "gauge"))
         show_orientation = editable and is_bar
         self.orientation_combo.setEnabled(show_orientation)
         self.orientation_label.setVisible(show_orientation)
         self.orientation_combo.setVisible(show_orientation)
 
     def screen_number(self):
-        # L1 used to hardcode to 1 (the clock) always -- but L1 really
-        # toggles between two real screens (stats and clock, see
-        # read_active_screen_num()'s own docstring). Direct report:
-        # "the main page preview shows L1 stats but the custom page
-        # still shows just the time" -- this tab's own "reference"
-        # preview was the one still hardcoded.
-        #
-        # Not a blind copy of read_active_screen_num() though: if the
-        # real current screen is 2-5 (some OTHER screen is live right
-        # now), showing that here would make the "L1" tab display an
-        # unrelated custom screen's content, which is wrong regardless
-        # of what's live elsewhere. g510_lcd_buttons.c's own L1 button
-        # handler (`cur >= 2 ? 0 : ...`) always resets to stats (0)
-        # when pressed from any other screen -- read directly from the
-        # real source, not assumed -- so that's the accurate answer
-        # for "what would L1 show right now" whenever L1 isn't the one
-        # currently active.
         if self.current_screen == "L1":
-            live = read_active_screen_num()
-            return live if live in (0, 1) else 0
-        return int(self.current_screen[1])  # "L2" -> 2
+            return 1
+        return int(self.current_screen[1:])
 
     def on_add_element(self):
         if self.current_screen == "L1":
             return  # button is disabled for this case, this is just a safety guard
         elements = self.config[self.current_screen]
         sensor_count = sum(1 for el in elements if el.get("kind", "sensor") == "sensor")
-        if sensor_count >= 16:
-            QMessageBox.warning(self, "Bildschirm voll", "Jeder Bildschirm unterstützt bis zu 16 Sensorelemente.")
+        if sensor_count >= MAX_SENSOR_ELEMENTS:
+            QMessageBox.warning(self, "Bildschirm voll", f"Jeder Bildschirm unterstützt bis zu {MAX_SENSOR_ELEMENTS} Sensorelemente.")
             return
         # No X/Y fields anymore -- new elements land at a default spot
         # (stacked below whatever's already there) and you drag them
@@ -2234,15 +1418,16 @@ class CustomScreensTab(QWidget):
         # before it, regardless of kind.
         default_y = (6 + 12 * len(elements)) % LCD_HEIGHT
         orientation = self.orientation_combo.currentData() if self.style_combo.currentData() == "bar" else "horizontal"
+        history = self.style_combo.currentData() in ("history", "gauge")
         elements.append({
             "kind": "sensor",
             "sensor": self.sensor_combo.currentData(),
             "style": self.style_combo.currentData(),
             "orientation": orientation,
             "x": 6,
-            "y": default_y,
+            "y": min(default_y, LCD_HEIGHT - 10) if history else default_y,
             "width": 8 if orientation == "vertical" else 40,
-            "height": 28,
+            "height": 10 if history else 28,
             "font_size": self.font_size_combo.currentData(),
         })
         sensor = elements[-1]["sensor"]
@@ -2259,7 +1444,7 @@ class CustomScreensTab(QWidget):
         answer = QMessageBox.question(
             self,
             "Bildschirmvorlage anwenden",
-            f"Alle Elemente auf {self.current_screen} durch die Vorlage "
+            f"Alle Elemente auf {load_screens()[self.screen_number()]} durch die Vorlage "
             f"„{PRESET_NAMES[preset]}“ ersetzen?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -2274,9 +1459,9 @@ class CustomScreensTab(QWidget):
     def on_apply_default_layout(self):
         answer = QMessageBox.question(
             self,
-            "Standardbelegung L2-L5",
-            "Alle Elemente auf L2 bis L5 durch die Standardbelegung ersetzen?\n\n"
-            + "\n".join(f"{k}: {PRESET_NAMES[v]}" for k, v in DEFAULT_SCREEN_PRESETS.items())
+            "Standardlayouts",
+            "Alle Elemente der vier bearbeitbaren Bildschirme ersetzen?\n\n"
+            + "\n".join(f"{SCREEN_NAMES[k]}: {PRESET_NAMES[v]}" for k, v in DEFAULT_SCREEN_PRESETS.items())
             + "\n\nDie bisherigen Bildschirme werden vorher als Sicherung "
               "(custom_screens.txt.vor-standardbelegung) abgelegt.",
             QMessageBox.Yes | QMessageBox.No,
@@ -2303,12 +1488,10 @@ class CustomScreensTab(QWidget):
         if not ok:
             QMessageBox.warning(self, "Profil", err)
             return
-        import os
-        runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
         try:
-            Path(runtime, "g510lcd_screen").write_text(str(profile["screen"]))
-        except OSError:
-            pass
+            show_screen(profile["screen"])
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Profil", f"Bildschirmwechsel fehlgeschlagen: {error}")
 
     def on_import_image(self):
         if self.current_screen == "L1":
@@ -2471,6 +1654,18 @@ class CustomScreensTab(QWidget):
         self.refresh_elements_list()
         self.refresh_preview()
 
+    def on_add_frame(self):
+        if self.current_screen == "L1":
+            return
+        elements = self.config[self.current_screen]
+        if sum(el.get("kind") == "frame" for el in elements) >= 8:
+            QMessageBox.warning(self, "Bildschirm voll", "Jeder Bildschirm unterstützt bis zu 8 Rahmen.")
+            return
+        elements.insert(0, {"kind": "frame", "x": 2, "y": 2, "width": 40, "height": 20})
+        save_custom_screens(self.config)
+        self.refresh_elements_list()
+        self.refresh_preview()
+
     def on_remove_element(self, index):
         del self.config[self.current_screen][index]
         save_custom_screens(self.config)
@@ -2489,6 +1684,7 @@ class CustomScreensTab(QWidget):
             el["content"] = content
         elif el.get("kind", "sensor") == "sensor":
             el["label"] = value.strip()[:31]
+            el["hide_label"] = not bool(el["label"])
         else:
             return
         save_custom_screens(self.config)
@@ -2526,13 +1722,15 @@ class CustomScreensTab(QWidget):
         # back so its far edge stays on the visible 160x43 screen,
         # same rule the drag-clamp fix now enforces for new drags.
         for el in self.config[self.current_screen]:
-            if el.get("kind") in ("image", "visualizer"):
+            if el.get("kind") in ("image", "visualizer", "frame") or el.get("style") in ("history", "gauge"):
                 w, h = el.get("width", 0), el.get("height", 0)
             elif el.get("kind") == "text":
                 _, h_ratio = FONT_SIZE_SCALE.get(el.get("font_size", 0), (1.0, 1.0))
                 w, h = TEXT_CHAR_PX, round(ELEMENT_HIT_H * h_ratio)
+            elif el.get("style") == "bar" and el.get("orientation") == "vertical":
+                w, h = el.get("width", 8), el.get("height", 28)
             else:
-                w, h = ELEMENT_HIT_W, ELEMENT_HIT_H
+                w, h = el.get("max_width", 0) or ELEMENT_HIT_W, ELEMENT_HIT_H
             el["x"] = max(0, min(el["x"], LCD_WIDTH - w))
             el["y"] = max(0, min(el["y"], LCD_HEIGHT - h))
         save_custom_screens(self.config)
@@ -2663,7 +1861,8 @@ class CustomScreensTab(QWidget):
 
         if self.current_screen == "L1":
             self.fix_overflow_btn.hide()
-            info = QLabel("L1 ist der eingebaute Uhrbildschirm – hier nur als Referenz zu sehen, nicht bearbeitbar.")
+            info = QLabel("Die Uhr bietet 20 fertige Designs. Oben auswählen oder im Uhr-Screen "
+                          "mit L2/L3 blättern. Die einzelnen Bestandteile sind nicht frei verschiebbar.")
             info.setWordWrap(True)
             info.setObjectName("Status")
             self.elements_layout.addWidget(info)
@@ -2678,13 +1877,15 @@ class CustomScreensTab(QWidget):
         # any element's content likely extends past the visible screen.
         overflowing = False
         for el in elements:
-            if el.get("kind") in ("image", "visualizer"):
+            if el.get("kind") in ("image", "visualizer", "frame") or el.get("style") in ("history", "gauge"):
                 w, h = el.get("width", 0), el.get("height", 0)
             elif el.get("kind") == "text":
                 _, h_ratio = FONT_SIZE_SCALE.get(el.get("font_size", 0), (1.0, 1.0))
                 w, h = TEXT_CHAR_PX, round(ELEMENT_HIT_H * h_ratio)
+            elif el.get("style") == "bar" and el.get("orientation") == "vertical":
+                w, h = el.get("width", 8), el.get("height", 28)
             else:
-                w, h = ELEMENT_HIT_W, ELEMENT_HIT_H
+                w, h = el.get("max_width", 0) or ELEMENT_HIT_W, ELEMENT_HIT_H
             if el["x"] + w > LCD_WIDTH or el["y"] + h > LCD_HEIGHT:
                 overflowing = True
                 break
@@ -2698,12 +1899,18 @@ class CustomScreensTab(QWidget):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             kind = el.get("kind", "sensor")
-            has_size_btn = kind in ("sensor", "text")
+            has_size_btn = (kind in ("sensor", "text")
+                            and el.get("style") not in ("history", "gauge")
+                            and not (el.get("hide_label") and el.get("style") == "bar"))
             # Position/width shown on the canvas itself now (drag to
             # move, drag the handle to resize) -- repeating exact
             # coordinates here just made rows overflow the narrow panel
             # and need a horizontal scrollbar, so this stays short.
-            if kind == "image":
+            if kind == "frame":
+                text = QLabel(f"Rahmen {el['width']}x{el['height']}")
+                text.setToolTip(
+                    f"x={el['x']} y={el['y']}\nAm Rand verschieben, an der Ecke skalieren.")
+            elif kind == "image":
                 name = Path(el["path"]).stem
                 text = QLabel(f"Bild: {name}")
                 text.setToolTip(f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px")
@@ -2718,6 +1925,18 @@ class CustomScreensTab(QWidget):
             elif kind == "visualizer":
                 text = QLabel("Visualizer (Live-Audio)")
                 text.setToolTip(f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px")
+            elif el.get("style") == "history":
+                text = QLabel("DL-Verlauf" if el["sensor"] == "NET_DOWN" else "UL-Verlauf")
+                text.setToolTip(
+                    "Letzte 60 Messwerte, eigene automatische Höhenskala. "
+                    f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px\n"
+                    "In der Vorschau ziehen oder an der Ecke skalieren.")
+            elif el.get("style") == "gauge":
+                text = QLabel(SENSOR_LABELS.get(el["sensor"], el["sensor"]))
+                text.setToolTip(
+                    "Füllbalken mit integriertem Wert, ohne separate Beschriftung.\n"
+                    f"x={el['x']} y={el['y']} {el['width']}x{el['height']}px\n"
+                    "In der Vorschau ziehen oder an der Ecke skalieren.")
             else:
                 sensor = el["sensor"]
                 sensor_name = SENSOR_LABELS.get(sensor, sensor)
@@ -2750,11 +1969,10 @@ class CustomScreensTab(QWidget):
                         self.on_element_format_changed(idx, selected_sensor, combo.currentData())
                     )
                 else:
-                    label = el.get("label") or DEFAULT_SENSOR_DISPLAY_LABELS.get(
-                        sensor, sensor_name
-                    )
+                    label = "" if el.get("hide_label") else (
+                        el.get("label") or DEFAULT_SENSOR_DISPLAY_LABELS.get(sensor, sensor_name))
                     text = QLineEdit(label)
-                    text.setPlaceholderText("LCD-Beschriftung")
+                    text.setPlaceholderText(sensor_name if el.get("hide_label") else "LCD-Beschriftung")
                     text.setAccessibleName(f"LCD-Beschriftung für {sensor}")
                     orientation = (
                         f", {el['orientation']}"
@@ -2850,7 +2068,32 @@ class CustomScreensTab(QWidget):
                 )
             )
 
+    def on_clock_layout_selected(self):
+        try:
+            save_clock_layout(self.clock_layout_combo.currentData())
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Uhr-Design", f"Speichern fehlgeschlagen: {error}")
+        self.refresh_preview()
+
+    def cycle_clock_layout(self, step):
+        try:
+            save_clock_layout((load_clock_layout() + step) % len(CLOCK_LAYOUTS))
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Uhr-Design", str(error))
+        self.refresh_preview()
+
     def refresh_preview(self):
+        if self.current_screen == "L1":
+            try:
+                index = load_clock_layout()
+            except (OSError, ValueError) as error:
+                self.drag_hint.setText(f"Uhr-Design konnte nicht geladen werden: {error}")
+                self.preview_canvas.set_data(None, [])
+                return
+            self.clock_layout_combo.setCurrentIndex(index)
+            self.drag_hint.setText(
+                "20 Uhr-Designs: Auswahl oben oder auf der Tastatur mit L2 zurück / L3 weiter "
+                "(Standardbelegung). Die Auswahl bleibt gespeichert.")
         # Image resize regen now happens on a background worker (see
         # ImageResizeWorker/_on_image_resize_finished) which calls this
         # itself once the .bin file + el["width"/"height"] are updated
@@ -2865,12 +2108,12 @@ class CustomScreensTab(QWidget):
         )
         elements = self.config.get(self.current_screen, [])  # L1 isn't a key in self.config -- no draggable elements there
         game_bounds = {
-            component: bounds.get(16 + index)
+            component: bounds.get(GAME_BOUNDS_BASE + index)
             for index, component in enumerate(GAME_DASHBOARD_COMPONENTS)
         }
         if self.current_screen == "L4" and game_bounds["cpu"] and game_bounds["gpu"]:
             elements = []
-            for component, bound_index in zip(GAME_DASHBOARD_COMPONENTS, (16, 17, 18)):
+            for component, bound_index in zip(GAME_DASHBOARD_COMPONENTS, range(GAME_BOUNDS_BASE, GAME_BOUNDS_BASE + 3)):
                 bound = bounds.get(bound_index)
                 if not bound:
                     continue
@@ -3085,6 +2328,79 @@ class GameLogosTab(QWidget):
         self.fill_list()
 
 
+class OverviewTab(QWidget):
+    navigate = pyqtSignal(int)
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        cards = QHBoxLayout()
+        self.screen_name = QLabel()
+        self.screen_count = QLabel()
+        for title, value in (("Aktiver LCD-Bildschirm", self.screen_name),
+                             ("Verfügbare Bildschirme", self.screen_count)):
+            card = QWidget()
+            card.setObjectName("Card")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(20, 16, 20, 16)
+            box.addWidget(QLabel(title))
+            value.setObjectName("Metric")
+            value.setWordWrap(True)
+            value.setTextFormat(Qt.PlainText)
+            box.addWidget(value)
+            cards.addWidget(card, 1)
+        layout.addLayout(cards)
+        layout.addWidget(QLabel("Live-Vorschau · Logitech G510s · 160 × 43 Pixel"))
+        self.preview = ScreenPreviewCanvas()
+        self.preview.setEnabled(False)
+        layout.addWidget(self.preview, 1)
+        self.error = QLabel()
+        self.error.setWordWrap(True)
+        self.error.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.error)
+        actions = QHBoxLayout()
+        for name, index in (("LCD-Bildschirme gestalten", 1), ("LCD-Tasten belegen", 2),
+                            ("Tastatur && Profile", 3)):
+            button = QPushButton(name)
+            button.clicked.connect(lambda checked=False, target=index: self.navigate.emit(target))
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        note = QLabel(
+            "Alle Einstellungen bleiben lokal gespeichert. L1 wechselt den Bildschirm; "
+            "L2–L5 führen seine Funktionen aus.")
+        note.setWordWrap(True)
+        note.setObjectName("Status")
+        layout.addWidget(note)
+        self.timer = QTimer(self)
+        self.timer.setInterval(2000)
+        self.timer.timeout.connect(self.refresh)
+
+    def refresh(self):
+        try:
+            screens = load_screens()
+            number = read_screen()
+            self.screen_name.setText(screens[number])
+            self.screen_count.setText(str(len(screens)))
+            pixmap, _, error = render_preview(number, tag="overview")
+            self.preview.set_data(pixmap, [])
+            self.error.setText(error or "")
+        except (OSError, ValueError) as error:
+            self.screen_name.setText("Nicht verfügbar")
+            self.screen_count.setText("Nicht verfügbar")
+            self.preview.set_data(None, [])
+            self.error.setText(f"Übersicht konnte nicht geladen werden: {error}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self.timer.start()
+
+    def hideEvent(self, event):
+        self.timer.stop()
+        super().hideEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3094,12 +2410,82 @@ class MainWindow(QMainWindow):
         self.keyboard_tab = KeyboardTab()
         self.custom_tab = CustomScreensTab()
 
-        tabs = QTabWidget()
-        tabs.addTab(self.keyboard_tab, "Tastatur && Profile")
-        tabs.addTab(self.custom_tab, "LCD-Bildschirme")
+        self.overview_tab = OverviewTab()
         self.logos_tab = GameLogosTab()
-        tabs.addTab(self.logos_tab, "Spiel-Logos")
-        self.setCentralWidget(tabs)
+        self.keys_tab = ScreenKeysTab()
+        self.custom_tab.screens_changed.connect(self.keys_tab.reload)
+        self.keys_tab.bindings_changed.connect(self.custom_tab.refresh_function_buttons)
+        self.page_widgets = [self.overview_tab, self.custom_tab, self.keys_tab,
+                             self.keyboard_tab, self.logos_tab]
+        titles = ["Übersicht", "LCD-Bildschirme", "LCD-Tasten", "Tastatur & Profile",
+                  "Spiel-Logos"]
+        descriptions = [
+            "Deine Tastatur und die aktuelle LCD-Anzeige im Überblick.",
+            "Bildschirm auswählen, Elemente hinzufügen und direkt in der Vorschau anordnen.",
+            "Die Funktionen von L2 bis L5 für jeden Bildschirm festlegen.",
+            "Beleuchtung, Profile und G-Tasten-Makros verwalten.",
+            "Automatische Spielanzeigen und eigene Logos verwalten.",
+        ]
+        shell = QWidget()
+        root = QHBoxLayout(shell)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        sidebar = QWidget()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(210)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 24, 14, 14)
+        brand = QLabel("G510s")
+        brand.setObjectName("Brand")
+        side.addWidget(brand)
+        side.addWidget(QLabel("STEUERUNG"))
+        side.addSpacing(24)
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("Navigation")
+        self.navigation.addItems(titles)
+        side.addWidget(self.navigation, 1)
+        footer = QLabel("Logitech G510s\nLCD · RGB · Makros\n\nF11  Vollbild\nEsc  Vollbild verlassen")
+        footer.setObjectName("Status")
+        side.addWidget(footer)
+        root.addWidget(sidebar)
+        content = QVBoxLayout()
+        content.setContentsMargins(20, 18, 20, 8)
+        header = QHBoxLayout()
+        headings = QVBoxLayout()
+        self.page_title = QLabel()
+        self.page_title.setObjectName("PageTitle")
+        self.page_description = QLabel()
+        self.page_description.setWordWrap(True)
+        self.page_description.setObjectName("Status")
+        headings.addWidget(self.page_title)
+        headings.addWidget(self.page_description)
+        header.addLayout(headings, 1)
+        self.fullscreen_button = QPushButton("Vollbild · F11")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        header.addWidget(self.fullscreen_button)
+        content.addLayout(header)
+        self.pages = QStackedWidget()
+        for page in self.page_widgets:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(page)
+            self.pages.addWidget(scroll)
+        content.addWidget(self.pages, 1)
+        root.addLayout(content, 1)
+        self.setCentralWidget(shell)
+
+        def select_page(index):
+            self.pages.setCurrentIndex(index)
+            self.page_title.setText(titles[index])
+            self.page_description.setText(descriptions[index])
+
+        self.navigation.currentRowChanged.connect(select_page)
+        self.overview_tab.navigate.connect(self.navigation.setCurrentRow)
+        self.navigation.setCurrentRow(0)
+        QShortcut(QKeySequence("F11"), self, activated=self.toggle_fullscreen)
+        QShortcut(QKeySequence("Escape"), self, activated=self.leave_fullscreen)
+        self._restore_maximized = False
 
         # Direct request: "make me a save button/feature o dont trust
         # my settings will survive reboots" -- every individual action
@@ -3112,11 +2498,10 @@ class MainWindow(QMainWindow):
         # supposed to be there -- a real verification, not just "the
         # write call didn't throw" -- and reports exactly what it
         # confirmed (or, honestly, what failed) in the status bar. A
-        # QToolBar (not a wrapper around centralWidget()) so it's
-        # visible from every tab without disturbing anything that
-        # assumes centralWidget() is the QTabWidget itself.
         toolbar = self.addToolBar("Speichern")
+        self.addToolBar(Qt.BottomToolBarArea, toolbar)
         toolbar.setMovable(False)
+        toolbar.setFloatable(False)
         # Direct report: "the 'save all settings now' button has a
         # weird rectangle icon before it" -- the floppy-disk emoji
         # (U+1F4BE) has no matching glyph in this system's font stack,
@@ -3126,26 +2511,43 @@ class MainWindow(QMainWindow):
         self.save_all_btn.setObjectName("saveAllBtn")
         self.save_all_btn.setToolTip("Speichert alles erneut und prüft, ob es korrekt von der Festplatte zurückgelesen wird – alles wird bereits automatisch gespeichert, das hier bestätigt es nur")
         self.save_all_btn.clicked.connect(self.on_save_all)
+        saved_hint = QLabel("Änderungen werden automatisch gespeichert.")
+        saved_hint.setObjectName("Status")
+        toolbar.addWidget(saved_hint)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
         toolbar.addWidget(self.save_all_btn)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage(
-            "Jede Änderung hier wird sofort auf die Festplatte gespeichert – "
-            "mit „Alle Einstellungen jetzt speichern“ kannst du das jederzeit prüfen lassen."
+            "Bereit · Einstellungen lokal gespeichert · F11: Vollbild"
         )
 
-        # Fenstergröße: höchstens so groß, wie der Tab "Tastatur & Profile"
-        # braucht. Größere Tabs scrollen bei Bedarf.
-        self.adjustSize()
-        pages = [tabs.widget(i).sizeHint() for i in range(tabs.count())]
-        hint = self.sizeHint()
-        extra_w = hint.width() - max(p.width() for p in pages)
-        extra_h = hint.height() - max(p.height() for p in pages)
-        keyboard_hint = self.keyboard_tab.sizeHint()
-        self.setMaximumSize(keyboard_hint.width() + extra_w,
-                            keyboard_hint.height() + extra_h)
-        self.resize(self.maximumSize())
+        self.setMinimumSize(900, 580)
+        available = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1440, available.width()), min(900, available.height()))
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.leave_fullscreen()
+        else:
+            self._restore_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def leave_fullscreen(self):
+        if self.isFullScreen():
+            if self._restore_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, "fullscreen_button"):
+            self.fullscreen_button.setText(
+                "Vollbild verlassen · F11" if self.isFullScreen() else "Vollbild · F11")
 
     def on_save_all(self):
         """Real disk round-trip verification, not a cosmetic no-op:
@@ -3159,7 +2561,7 @@ class MainWindow(QMainWindow):
         be missed, has to be dismissed) that itemizes exactly what got
         verified PER SCREEN -- also directly answers "does it also save
         the L screens?": yes, `self.custom_tab.config` already holds
-        every screen (L2-L5) in one dict, saved/reloaded together, so
+        every editable screen in one dict, saved/reloaded together, so
         the breakdown below always lists all of them, even ones with 0
         elements, as visible proof none were silently skipped."""
         problems = []
@@ -3218,6 +2620,30 @@ class MainWindow(QMainWindow):
         except (OSError, json.JSONDecodeError) as e:
             problems.append(f"Makros: {e}")
 
+        try:
+            if self.keys_tab.bindings is None:
+                problems.append("LCD-Tasten: Belegung konnte nicht geladen werden")
+            elif load_bindings() != self.keys_tab.bindings:
+                problems.append("LCD-Tasten: gespeicherte Belegung weicht von der Anzeige ab")
+            else:
+                detail_lines.append("    LCD-Tasten: Belegung bestätigt")
+        except (OSError, ValueError) as error:
+            problems.append(f"LCD-Tasten: {error}")
+
+        selected_screen = None
+        try:
+            active_tab = self.page_widgets[self.pages.currentIndex()]
+            if active_tab is self.custom_tab:
+                selected_screen = self.custom_tab.apply_selected_screen()
+            elif active_tab is self.keys_tab:
+                screen = self.keys_tab.screen.currentData()
+                show_screen(screen)
+                if read_screen() != screen:
+                    raise OSError("Die Bildschirmwahl konnte nicht bestätigt werden.")
+                selected_screen = self.keys_tab.screen.currentText()
+        except (OSError, ValueError) as error:
+            problems.append(f"Bildschirmwechsel: {error}")
+
         now = datetime.datetime.now().strftime("%H:%M:%S")
         if problems:
             msg = "Speichern FEHLGESCHLAGEN um " + now + ":\n\n" + "\n".join(problems)
@@ -3229,6 +2655,8 @@ class MainWindow(QMainWindow):
                 "Eigene Bildschirme:\n" + "\n".join(detail_lines[:len(self.custom_tab.config)]) + "\n\n"
                 "Beleuchtung + Makros:\n" + "\n".join(detail_lines[len(self.custom_tab.config):])
             )
+            if selected_screen is not None:
+                msg += f"\n\nLCD-Bildschirm ausgewählt: {selected_screen}"
             self.status.showMessage(f"✓ Um {now} gespeichert und auf der Festplatte bestätigt")
             QMessageBox.information(self, "Gespeichert", msg)
 

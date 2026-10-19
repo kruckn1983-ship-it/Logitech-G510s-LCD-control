@@ -29,10 +29,7 @@ build() {
   # in this package's own fixed /usr/lib/g510-lcd -- known and fixed
   # at build time, no per-install discovery needed the way a git-clone
   # install (install.sh) has to do it.
-  gcc $(pkg-config --cflags freetype2) -DPROJECT_DIR='"/usr/lib/g510-lcd"' \
-    src/g510_lcd_stats.c -o src/g510_lcd_stats \
-    -lg15render $(pkg-config --libs freetype2) -lm
-  gcc src/g510_lcd_buttons.c -o src/g510_lcd_buttons
+  bash scripts/build.sh --project-dir /usr/lib/g510-lcd
 }
 
 package() {
@@ -53,6 +50,11 @@ package() {
   # layout, not a new, untested code path.
   install -Dm755 src/g510_app.py "$pkgdir/usr/lib/$pkgname/src/g510_app.py"
   install -Dm755 src/g510_canvas.py "$pkgdir/usr/lib/$pkgname/src/g510_canvas.py"
+  install -Dm644 src/g510_screen_keys.py "$pkgdir/usr/lib/$pkgname/src/g510_screen_keys.py"
+  install -Dm644 src/g510_key_settings.py "$pkgdir/usr/lib/$pkgname/src/g510_key_settings.py"
+  for module in g510_theme g510_layouts g510_layout_store g510_preview g510_screen_canvas; do
+    install -Dm644 "src/$module.py" "$pkgdir/usr/lib/$pkgname/src/$module.py"
+  done
   install -Dm755 src/g510_macro_daemon.py "$pkgdir/usr/lib/$pkgname/src/g510_macro_daemon.py"
   install -Dm755 src/png-to-lcd.py "$pkgdir/usr/lib/$pkgname/src/png-to-lcd.py"
   install -Dm755 src/g510_lcd_stats "$pkgdir/usr/lib/$pkgname/src/g510_lcd_stats"
