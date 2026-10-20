@@ -78,12 +78,12 @@ fi
 
 echo "=== 6/7: systemd --user services ==="
 mkdir -p ~/.config/systemd/user
-for svc in g510-lcd-stats g510-lcd-buttons g510-macro-daemon; do
+for svc in g510-lcd-stats g510-lcd-buttons g510-macro-daemon g510-backlight g510-game-colors; do
     sed "s|__PROJECT_DIR__|$DIR|g" "services/$svc.service" > ~/.config/systemd/user/"$svc.service"
 done
 systemctl --user daemon-reload
 sudo systemctl enable --now ydotool.service 2>/dev/null || systemctl --user enable --now ydotool.service 2>/dev/null || echo "  Hinweis: ydotool-Dienst nicht gefunden - Makros brauchen ydotoold (siehe Anleitung)."
-systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
+systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service g510-backlight.service g510-game-colors.service
 
 echo "=== 7/7: Desktop shortcuts ==="
 # Generated fresh from the resolved $DIR every run -- a clean clone used to

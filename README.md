@@ -39,6 +39,34 @@ systemctl --user status g510-lcd-stats.service g510-lcd-buttons.service g510-mac
 
 Alle drei Dienste sollten `active (running)` anzeigen. Falls das LCD nicht sofort aufleuchtet, trenne die Tastatur kurz vom Rechner und schließe sie wieder an.
 
+Die mit **Anwenden** gewählte Beleuchtungsfarbe wird automatisch gespeichert.
+Der zusätzliche Benutzerdienst `g510-backlight.service` stellt sie bei der
+Anmeldung wieder her, auch wenn beim frühen USB-Ereignis noch keine
+Benutzersitzung vorhanden war. Er wartet auf die LED-Schreibrechte und meldet
+Probleme im Journal, statt die Wiederherstellung still zu überspringen.
+Erfolgreich ausgeführt erscheint er als `active (exited)`; er benötigt kein
+dauerhaft laufendes Programm. Die vorhandene udev-Wiederherstellung beim
+erneuten Einstecken bleibt erhalten.
+
+**Spielfarben:** Unter **Spiel-Logos** lässt sich für jedes installierte
+Steam-Spiel eine optionale Tastaturfarbe auswählen oder entfernen. Die Wahl
+liegt in `~/.local/share/g510-lcd/game_colors.json` und überschreibt niemals
+die gespeicherte Standardfarbe. `g510-game-colors.service` übernimmt die
+Umschaltung auch bei geschlossenem Tool, unabhängig von Ton oder Medienwiedergabe.
+Das fokussierte Spiel bestimmt die Farbe. Beim Wechsel auf den Desktop bleibt
+die bisherige Spielfarbe erhalten, solange dieses Spiel noch läuft; nach seinem
+Ende wird der gespeicherte Standard wiederhergestellt. Spiele ohne eigene Farbe
+lösen keinen Farbwechsel aus. Auch beim Stoppen des Dienstes wird
+die Standardfarbe wiederhergestellt.
+
+Vordergrunderkennung: KDE/KWin (auch natives Wayland) über ein temporäres,
+beim Beenden entladenes KWin-Skript; andere X11-Desktops über `xprop`.
+Andere Wayland-Compositoren werden nicht unterstützt und melden einen Fehler
+im Dienstjournal. Spiele werden anhand der von Steam/Proton exportierten App-ID
+in ihren Prozessen erkannt; das beendet die Spielfarbe erst, wenn alle
+zugehörigen Prozesse beendet sind. Nicht-Steam-Spiele ohne Steam-App-ID sind
+nicht automatisch zuordenbar. Es wird keine Farbe vorab zugewiesen.
+
 **Enthaltene Funktionen:**
 
 - Dunkle Oberfläche mit linker Navigation, Übersicht und Live-LCD-Vorschau; Einstellungen rechts neben dem LCD-Editor, Speichern und Status unten. Fenster frei vergrößerbar und maximierbar; **F11** oder **Vollbild** nutzt den ganzen Bildschirm, **Esc** verlässt Vollbild. Die LCD-Vorschau skaliert proportional, kleinere Fenster bieten bei Bedarf Scrollleisten.
@@ -48,7 +76,11 @@ Alle drei Dienste sollten `active (running)` anzeigen. Falls das LCD nicht sofor
 - G-Tasten-Makros mit den Profilen M1, M2 und M3
 - Editor für eigene Bildschirme: Auswahl per Dropdown; System, Media Center, Spiele und Netzwerk gestalten, zusätzliche Screens ohne feste Anzahl anlegen, umbenennen und löschen. Die eingebaute Uhr bleibt unveränderbar. L1 blättert durch die fünf vorhandenen und anschließend alle eigenen Bildschirme.
 - Uhr-Screen mit **20 fertigen Designs**: Digital pur (bisheriges Layout), Analog-/Digital-Kombinationen, Siebensegment, Binäruhr, Punktmatrix, Kalender und weitere Varianten. Im Uhr-Screen blättern **L2 zurück / L3 weiter** im Kreis; alternativ im Tool unter **Uhr-Design** auswählen. Die letzte Auswahl bleibt über Neustarts erhalten. Lokale Systemzeit, deutsche Datumsanzeige, keine zusätzlichen Schriftdateien.
-- Bildschirmabhängige Funktionstasten L2–L5: über die Navigation **LCD-Tasten** einstellbar. Media Center startet mit vorheriger Titel, nächster Titel, Play und Pause; Uhr mit vorherigem/nächstem Uhr-Layout; andere Screens zunächst unbelegt. Bereits gespeicherte Belegungen bleiben unverändert.
+- **Je 20 Designs für System, Media Center, Spiele und Netzwerk**: das bisherige bearbeitbare Layout als Design 1 plus 19 fertige Varianten. Standardmäßig mit **L2 zurück / L3 weiter** blättern oder im Tool unter **Screen-Design** auswählen. Auswahl je Screen dauerhaft gespeichert, Vorschau und LCD verwenden denselben Renderer. Eigene Elemente und Spiele-Logos bleiben erhalten; fertige Designs sind schreibgeschützt. Bereits gespeicherte Tastenbelegungen bleiben gültig und lassen sich im jeweiligen Tastenmenü auf Designwechsel umstellen. Media Center behält L4 Play / L5 Pause.
+- **Spiele-Warteanzeige:** Auswahl 1 behält die bisherige Raumschiffanimation bei leerem Layout. Auswahl 2–20 zeigt erkennbare Spielideen: **Tetris** mit fallendem Stein und vier abgebauten Reihen, **Pac-Man** mit Punkten und Verfolgern, **Portal** mit einem Würfeltransfer zwischen zwei Wandportalen, außerdem Pong, Breakout, Snake, Frogger, Bomberman, Asteroids, Sokoban, Minesweeper, Flipper, Plattformlauf, Space Invaders, Minecraft-Blockabbau, Rhythmusspiel, Rennspiel, Dungeon und Lemmings. Alle zusätzlichen Motive sind direkt für **160 × 43 Pixel** gezeichnet, textfrei und bewegt. Eigene vereinfachte Pixelgrafiken statt übernommener Originalgrafiken oder Logos; die Spielnamen im Tool kennzeichnen die Inspiration. Die Animationen erscheinen nur ohne laufendes Spiel; während eines Spiels bleiben dessen Logo/Titel und die jeweilige Spielansicht erhalten. L2/L3 und das Dropdown wählen dieselbe dauerhaft gespeicherte Variante.
+- **Media-Center-Warteanzeige:** Auswahl 1 erhält die bisherige Musikwelle bei leerem Layout. Auswahl 2–20 bietet 19 zusätzliche Animationen, etwa schwebende Noten, Schallplatte, Filmstreifen, Kassettenspulen, Klavier und Projektor. Sie erscheinen ohne Medien; laufende und pausierte Wiedergabe behalten ihre Playeransicht. Die Animationen sind dekorativ, keine vorgetäuschten Audio-Messwerte. Auswahl per L2/L3 oder Dropdown, bewegte Tool-Vorschau mit vier Aktualisierungen pro Sekunde.
+- **Textfreie Vollbildanimationen:** Alle 20 Warteanimationen in Media Center und Spiele nutzen die gesamte LCD-Fläche von 160 × 43 Pixeln, ohne Überschrift oder Bereitschaftstext. Die bisherigen Textzeilen sind für die Animation freigegeben; Titel, Künstler und Spielinformationen während der Wiedergabe bzw. eines laufenden Spiels bleiben erhalten.
+- Bildschirmabhängige Funktionstasten L2–L5: Der jeweilige Button unter der Vorschau führt die ausgewählte Funktion direkt aus. Das separate Menü **Belegung ändern** darunter speichert eine andere Aktion pro Screen, ohne sie auszuführen. Beim Ausführen wird zuerst der im Tool ausgewählte Screen auf dem LCD aktiviert; Bildschirmwechsel durch eine Aktion werden im Tool nachvollzogen. Standardmäßig wechseln L2/L3 die Designs, im Media Center bleiben L4 Play / L5 Pause; bei der Uhr wechseln L2/L3 die Uhr-Layouts. Bereits gespeicherte Belegungen bleiben unverändert.
 - Netzwerkvorlage mit aktiver Schnittstelle, Download-/Uploadrate (KiB/s bzw. MiB/s), zwei getrennten Verlaufsgrafiken der letzten 60 Messwerte und lokaler IPv4-Adresse. Die Diagramme liegen mit Abstand rechts neben den Zahlen und sind im Editor verschiebbar und skalierbar. Kein Speedtest oder Internet-Verfügbarkeitstest. Kein separater Lüftersteuerungsbereich; BIOS-Regelung und LACT bleiben unabhängig.
 - Kleiner Winamp auf der Tastatur: animierte Equalizer-Balken sowie Titel, Interpret und Laufzeit des aktuell wiedergegebenen Mediums
 - Fortschrittsbalken für Medien mit einer bekannten Laufzeit
@@ -79,9 +111,10 @@ Die Oberfläche und ihre LCD-Daten sind nach Aufgaben getrennt:
 | [`src/g510_screen_canvas.py`](src/g510_screen_canvas.py) | Skalierte LCD-Vorschau, Auswahl, Verschieben und Größenänderungen |
 | [`src/g510_preview.py`](src/g510_preview.py) | Aufruf des nativen Renderers und Lesen seiner Bild-/Positionsausgabe |
 | [`src/g510_theme.py`](src/g510_theme.py) | Gemeinsames dunkles Oberflächendesign |
-| [`src/g510_screen_keys.py`](src/g510_screen_keys.py) | Screenkatalog, Tastenaktionen und gespeicherte Uhr-Auswahl |
+| [`src/g510_screen_keys.py`](src/g510_screen_keys.py) | Screenkatalog, Tastenaktionen und gespeicherte Uhr-/Screen-Designauswahl |
 | [`src/g510_lcd_stats.c`](src/g510_lcd_stats.c) | Sensorerfassung und LCD-Dienst |
 | [`src/clock_layouts.h`](src/clock_layouts.h) | Internes C-Uhrmodul mit den 20 Designs; vom Renderer eingebunden |
+| [`src/screen_designs.h`](src/screen_designs.h) | Je 19 zusätzliche native Designs für System, Medien, Spiele und Netzwerk |
 
 Installer, Rebuild-Skript, Paketbau und CI verwenden denselben
 [`scripts/build.sh`](scripts/build.sh)-Einstiegspunkt:

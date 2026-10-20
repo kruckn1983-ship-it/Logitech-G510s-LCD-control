@@ -12,15 +12,23 @@ zurück. Speichern und Status bleiben unten erreichbar.
 ## LCD-Tasten
 
 **L1** blättert durch **System → Media Center → Spiele → Netzwerk → Uhr**, danach durch alle eigenen Screens in Anlegereihenfolge und zurück zu System.
-**L2–L5** sind Funktionstasten des aktiven Bildschirms. Unter **LCD-Tasten**
-wählst du einen Bildschirm und für jede Taste eine Aktion; Änderungen werden
-sofort gespeichert und beim nächsten Tastendruck gelesen.
+**L2–L5** sind Funktionstasten des aktiven Bildschirms. Unter **LCD-Bildschirme**
+wählst du oben den Bildschirm. Die Buttons **L2**, **L3**, **L4** und **L5**
+unter der Vorschau führen die ausgewählte Funktion direkt aus. Das separate
+Menü **Belegung ändern** unter jedem Button zeigt die verfügbaren Aktionen und markiert die
+aktuelle Belegung. Änderungen werden sofort für diesen Screen gespeichert
+und beim nächsten echten Tastendruck gelesen. Die separate Seite „LCD-Tasten“
+entfällt; vorhandene Belegungen bleiben unverändert.
 
-Im Media Center gilt zunächst: **L2 vorheriger Titel, L3 nächster Titel,
-L4 Play, L5 Pause**. Im Uhr-Screen: **L2 Uhr-Layout zurück, L3 Uhr-Layout weiter**;
-L4/L5 bleiben unbelegt. Auf den anderen Bildschirmen sind die Tasten zunächst
-unbelegt. Bereits ausdrücklich gespeicherte Belegungen werden nicht überschrieben;
-die Uhr-Aktionen lassen sich unter **LCD-Tasten → Uhr** zuweisen. Zusätzlich stehen Play/Pause-Umschaltung, Lautstärke −/+ (5 Prozentpunkte),
+Auf **System, Media Center, Spiele und Netzwerk** gilt standardmäßig:
+**L2 vorheriges Design, L3 nächstes Design** (je 20, zyklisch).
+Im Media Center bleiben **L4 Play, L5 Pause**; sonst bleiben L4/L5 unbelegt.
+Im Uhr-Screen wechseln L2/L3 weiterhin die 20 Uhr-Layouts.
+Bereits ausdrücklich gespeicherte Belegungen werden nicht überschrieben:
+Bei Bedarf im Menü **Screen-Design zurück / weiter** für L2/L3 auswählen.
+Designaktionen sind nur auf den vier passenden Screens verfügbar, Uhr-Aktionen
+nur auf **Uhr**. Titelwechsel bleiben als frei zuweisbare Medienaktionen erhalten.
+Zusätzlich stehen Play/Pause-Umschaltung, Lautstärke −/+ (5 Prozentpunkte),
 Stummschaltung und direkte Bildschirmwechsel zur Auswahl. Medienaktionen gehen
 an einen einzelnen MPRIS-Player (aktive Wiedergabe vor Pause, bei Gleichstand
 Browser-Integration bevorzugt), niemals an alle Player gleichzeitig. Webradio
@@ -28,13 +36,14 @@ ohne MPRIS kann angezeigt, damit aber nicht gesteuert werden. Aktionsfehler
 stehen im Journal von `g510-lcd-buttons.service`.
 
 Die automatische Medien-/Spieleumschaltung bleibt erhalten. Eine manuelle Wahl
-per L1 oder über **Bildschirm jetzt auf dem LCD anzeigen** hat Vorrang während
+per L1 oder über das Bildschirm-Dropdown hat Vorrang während
 der laufenden Wiedergabe; nach mindestens fünf Sekunden ohne Wiedergabe wird
 dieser Vorrang aufgehoben. Das gilt auch, wenn L1 gerade den automatisch
 angezeigten Screen auswählt. Die Bildschirmwahl und die L1-Taste in der
-Editor-Vorschau wechseln auch das echte LCD; die vier unteren Schaltflächen
-zeigen die Belegung, führen aber
-keine Aktionen aus.
+Editor-Vorschau wechseln auch das echte LCD. Ein Klick auf L2–L5 aktiviert
+zunächst den im Tool ausgewählten Screen und führt dann dessen aktuell gespeicherte
+Tastenaktion aus. Ein Bildschirmwechsel durch die Aktion wird auch im Tool übernommen.
+Nur die Menüs **Belegung ändern** darunter ändern die Belegung, ohne sie auszuführen.
 
 Die Belegung liegt in `~/.local/share/g510-lcd/lcd_keys.json`. Die bisherigen
 Layout-Schlüssel `L2` bis `L5` bleiben aus Kompatibilitätsgründen unverändert:
@@ -45,7 +54,7 @@ die direkten Bildschirmtasten. Bestehende Layouts werden nicht migriert oder
 Eigene Namen, Reihenfolge und fortlaufende IDs liegen in
 `~/.local/share/g510-lcd/screens.json`, ihre Layouts in `custom_screens.txt`
 als `SCREEN L6`, `SCREEN L7` usw. Neue Screens beginnen leer und mit
-unbelegten Funktionstasten. Unter **LCD-Tasten** stehen sie sofort als
+unbelegten Funktionstasten. Unter **LCD-Bildschirme** stehen sie sofort als
 Bildschirm und als Ziel einer Wechselaktion zur Verfügung. Beim Löschen
 werden Verweise auf diesen Screen unbelegt; seine ID wird nicht erneut vergeben.
 Wird der gerade angezeigte Screen gelöscht, wechselt das LCD zu System.
@@ -57,9 +66,18 @@ Tests für Tastenaktionen, Entprellung und manuelle Bildschirmpriorität:
 
 ## Grundlagen
 
-1. **Bildschirm auswählen** – Wähle oben im Dropdown System, Media Center, Spiele, Netzwerk, Uhr oder einen eigenen Screen. Die Auswahl gilt sofort für Vorschau und LCD. „Alle Einstellungen jetzt speichern“ übernimmt im Reiter LCD-Bildschirme bzw. LCD-Tasten zusätzlich den dort ausgewählten Bildschirm und prüft die zurückgelesene Bildschirmwahl. Fehler beim Übernehmen werden ausdrücklich gemeldet; die Bestätigung ist kein Nachweis der physischen LCD-Ausgabe.
+Die Warteanimationen von **Media Center** und **Spiele** sind textfrei und auf
+die gesamte Displayfläche (160 × 43 Pixel) skaliert, auch die jeweils erste
+Animation. Es gibt keine reservierten Überschrifts- oder Bereitschaftszeilen.
+Eigene Elemente in Design 1 und Informationen während laufender/pausierter
+Wiedergabe oder eines laufenden Spiels bleiben unverändert.
+
+1. **Bildschirm auswählen** – Wähle oben im Dropdown System, Media Center, Spiele, Netzwerk, Uhr oder einen eigenen Screen. Die Auswahl gilt sofort für Vorschau und LCD. „Alle Einstellungen jetzt speichern“ übernimmt im Reiter LCD-Bildschirme zusätzlich den dort ausgewählten Bildschirm und prüft die zurückgelesene Bildschirmwahl. Fehler beim Übernehmen werden ausdrücklich gemeldet; die Bestätigung ist kein Nachweis der physischen LCD-Ausgabe.
    - **Uhr bietet 20 fertige Designs.** Unter **Uhr-Design** direkt auswählen oder mit **Zurück / Weiter** blättern. Die einzelnen Bestandteile sind nicht frei verschiebbar; Hinzufügen und Importieren bleiben deaktiviert. Die erste Variante **Digital pur** ist die bisherige minimalistische Digitaluhr.
-   - **Alle anderen Bildschirme kannst du frei gestalten.** Media Center und Spiele haben bei leerem Layout eine automatische Ansicht; eigene Screens starten leer.
+   - **System, Media Center, Spiele und Netzwerk bieten je 20 Designs.** Unter **Screen-Design** direkt auswählen oder mit **Zurück / Weiter** bzw. den echten Tasten L2/L3 blättern. **Design 1 – Aktuelles Layout** verwendet unverändert deine bisherigen Elemente und bleibt bearbeitbar. Die 19 zusätzlichen Designs sind schreibgeschützt; beim Blättern werden weder eigene Elemente noch Spiele-Logos verändert. Die Auswahl wird für jeden Screen separat in `~/.local/share/g510-lcd/screen_design_2` bis `screen_design_5` gespeichert und beim Neustart wieder geladen. Änderungen per Tastatur erscheinen automatisch in der Tool-Vorschau.
+   - **Eigene Screens kannst du frei gestalten.** Media Center und Spiele haben in Design 1 bei leerem Layout ihre automatische Ansicht; eigene Screens starten leer.
+   - **Media Center: 19 zusätzliche Warteanimationen.** Auswahl 1 behält bei leerem Layout die bisherige Musikwelle. Auswahl 2–20 zeigt schwebende Noten, Schallplatte, Filmstreifen, Kassettenspulen, Klavier, Lautsprecherwellen, Metronom, Wellenband, Play-Symbol, CD, Notenzeilen, Filmklappe, Projektor, Notenkarussell, Kopfhörer, Radioskala, Tonbandschleife, tanzende Kacheln oder Notenkometen. Die Animationen sind rein dekorativ und erscheinen nur ohne Medien. Bei Wiedergabe und Pause bleiben Titel, Fortschritt und die jeweilige Playeransicht erhalten. Mit L2/L3 bzw. dem Dropdown wählen; Auswahl bleibt gespeichert und die Vorschau bewegt sich mit vier Aktualisierungen pro Sekunde.
+   - **Spiele: 19 erkennbare Spielabläufe als Warteanimationen.** Auswahl 1 erhält die bisherige Ansicht (bei leerem Layout das Raumschiff). Auswahl 2–4 zeigt Tetris (fallender Stein, vier volle Reihen, Reihenabbau), Pac-Man (Labyrinthjagd mit Punkten und Verfolgern) und Portal (ein Würfel verschwindet rechts und erscheint durch das linke Wandportal). Auswahl 5–20 ergänzt Pong, Breakout, Snake, Frogger, Bomberman, Asteroids, Sokoban, Minesweeper, Flipper, Plattformlauf, Space Invaders, Minecraft-Blockabbau, Rhythmusspiel, Rennspiel, Dungeon und Lemmings. Die Motive sind eigenständig gezeichnet, keine Kopien von Originalgrafiken oder Logos; die Spielnamen stehen nur im Auswahlmenü, nicht auf dem LCD. Alle zusätzlichen Motive nutzen native 160 × 43 Pixel ohne vertikale Streckung. Die Animationen bleiben textfrei und erscheinen nur ohne laufendes Spiel. Im Spiel bleibt das Spiele-Logo bzw. der Titel erhalten; nach Spielende kehrt die gewählte Warteanimation zurück. L2/L3 oder das Dropdown wählen die Variante, die Vorschau aktualisiert sich viermal pro Sekunde.
 
 2. **Sensor hinzufügen** – Wähle im ersten Auswahlfeld einen Sensor (zum Beispiel CPU-Auslastung, RAM oder GPU-Temperatur). Wähle **Zahl** für eine reine Zahlenanzeige, **Balken** für einen Balken mit danebenstehendem Zahlenwert oder **Füllbalken mit Wert** für den Zahlenwert direkt im Balken. Für normale Balken kannst du außerdem eine waagerechte oder senkrechte Ausrichtung einstellen. Klicke anschließend auf **Hinzufügen**. Senkrechte Balken zeigen standardmäßig ein kurzes Label über dem Balken; für die 20 CPU-Threads gibt es kompakte Labels C1 bis C20. Ein leeres Beschriftungsfeld blendet das Label aus.
 
@@ -99,8 +117,8 @@ Das war's. Eine **Speichern**-Schaltfläche gibt es nicht: Jede Änderung (Versc
 
 ## Auf der echten Tastatur anzeigen
 
-Drücke L1 wiederholt bis zum gewünschten Bildschirm, oder wähle ihn im Reiter
-**LCD-Tasten** und klicke **Bildschirm jetzt auf dem LCD anzeigen**.
+Drücke L1 wiederholt bis zum gewünschten Bildschirm, oder wähle ihn im Dropdown
+unter **LCD-Bildschirme**; die Auswahl gilt sofort auch für das LCD.
 Die Layoutänderungen werden weiterhin automatisch gespeichert.
 
 ## Dashboard-Vorlagen
@@ -142,16 +160,29 @@ Alle Sensoren, Beschriftungen und Rahmen bleiben bearbeitbar. Der System-Screen
 und die Vorlage **Systemübersicht** verwenden dasselbe Layout. Andere vorhandene
 Screen-Layouts werden durch die Auswahl dieser Vorlage nicht verändert.
 
+## Tastaturfarbe pro Spiel
+
+Unter **Spiel-Logos** ein Spiel auswählen und **Tastaturfarbe für dieses Spiel
+wählen...** anklicken. Die Farbe wird sofort gespeichert und als Hexwert mit
+Farbmarkierung angezeigt. **Keine eigene Spielfarbe** entfernt nur die Farbe,
+nicht das eigene Logo. Der Hintergrunddienst folgt dem Spiel im Vordergrund;
+ohne Spielfokus bleibt die bisherige Spielfarbe bis zum Ende dieses Spiels.
+Danach gilt wieder die zuletzt gespeicherte Standardfarbe aus **Tastatur & Profile**.
+Die GUI muss nicht geöffnet bleiben. KDE/KWin (X11/Wayland) und andere
+X11-Desktops werden unterstützt. Die Erkennung benötigt eine Steam-/Proton-App-ID
+im Spielprozess, aber keine Audiowiedergabe. Standardfarbe und Logos bleiben
+unverändert; Einstellungen liegen separat in `game_colors.json`.
+
 ## 20 Uhr-Designs
 
 Wähle den Screen **Uhr** und blättere auf der Tastatur mit **L2 zurück** bzw.
 **L3 weiter** (Standardbelegung). Nach Nummer 20 folgt wieder Nummer 1;
 rückwärts geht es von Nummer 1 zu Nummer 20. **L1** wechselt weiterhin den
 Screen und nicht das Uhr-Design. Die Uhr-Aktionen gelten nur im aktiven
-Uhr-Screen, führen keine Medienaktionen aus und sind unter **LCD-Tasten**
-änderbar. Die vier unteren Schaltflächen der Editor-Vorschau zeigen weiterhin
-nur die Tastenbelegung an; zum Blättern im Tool dienen die eigenen
-**Zurück / Weiter**-Schaltflächen neben **Uhr-Design**.
+Uhr-Screen, führen keine Medienaktionen aus und sind über die Button-Menüs unter
+**LCD-Bildschirme → Uhr** änderbar. Die Buttons L2/L3 führen den Layoutwechsel
+auch im Tool aus; die Menüs **Belegung ändern** liegen separat darunter.
+Alternativ dienen die **Zurück / Weiter**-Schaltflächen neben **Uhr-Design** zum Blättern.
 
 | Nr. | Design | Anzeige |
 | --- | --- | --- |

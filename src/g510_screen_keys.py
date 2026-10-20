@@ -15,6 +15,33 @@ CLOCK_LAYOUTS = (
     "Klappzahlen", "Punktmatrix", "Rahmenlos", "Terminal", "Tagesfortschritt",
 )
 CLOCK_ACTIONS = {"clock_previous": "Uhr-Layout zurück", "clock_next": "Uhr-Layout weiter"}
+DESIGN_ACTIONS = {"design_previous": "Screen-Design zurück", "design_next": "Screen-Design weiter"}
+SCREEN_DESIGNS = {
+    2: ("Aktuelles Layout", "Leistungsringe", "Thread-Matrix", "CPU-Fokus",
+        "GPU-Fokus", "Speicherzentrale", "Temperaturduo", "Vier Kacheln",
+        "Horizont", "Thread-Streifen", "Monitor", "Kompaktterminal",
+        "Ressourcenleisten", "Zweispaltig", "Telemetrie", "Tacho",
+        "Prozessorwand", "Speicherduo", "Minimal", "Statusband"),
+    3: ("Bisherige Ansicht / Musikwelle", "Schwebende Noten", "Schallplatte",
+        "Filmstreifen", "Kassettenspulen", "Klavier", "Lautsprecherwellen",
+        "Metronom", "Wellenband", "Play-Symbol", "CD", "Notenzeilen",
+        "Filmklappe", "Projektor", "Notenkarussell", "Kopfhörer",
+        "Radioskala", "Tonbandschleife", "Tanzende Kacheln", "Notenkometen"),
+    4: ("Bisherige Ansicht / Raumschiff", "Tetris: Vier Reihen",
+        "Pac-Man: Labyrinthjagd", "Portal: Würfeltransfer", "Pong: Ballwechsel",
+        "Breakout: Steinwand", "Snake: Futtersuche", "Frogger: Straßenquerung",
+        "Bomberman: Bombenlabyrinth", "Asteroids: Felsenfeld",
+        "Sokoban: Kistenschieben", "Minesweeper: Minenfeld", "Flipper: Kugeljagd",
+        "Jump 'n' Run: Plattformlauf", "Space Invaders: Pixel-Formation",
+        "Minecraft: Blockabbau", "Rhythmusspiel: Notenspuren",
+        "Rennspiel: Überholfahrt", "Dungeon: Schwert und Schild",
+        "Lemmings: Treppenwanderung"),
+    5: ("Aktuelles Layout", "Doppelverlauf", "Download-Fokus", "Upload-Fokus",
+        "Seitendiagramme", "Verlauf links", "Ratenkacheln", "Verbindung",
+        "Netzwerkterminal", "Panoramaverläufe", "Download groß", "Upload groß",
+        "Kompaktduo", "Geteilter Monitor", "IP-Fokus", "Minimalnetz",
+        "Verlaufband", "Zweispaltig", "Rahmenmonitor", "Statusband"),
+}
 ACTIONS = {
     "none": "Keine Aktion",
     "previous": "Vorheriger Titel",
@@ -26,11 +53,40 @@ ACTIONS = {
     "volume_up": "Lautstärke +",
     "mute": "Stumm umschalten",
     **CLOCK_ACTIONS,
+    **DESIGN_ACTIONS,
     **{f"screen_{key}": f"Bildschirm: {name}" for key, name in SCREENS.items()},
 }
 CONFIG_PATH = Path.home() / ".local/share/g510-lcd/lcd_keys.json"
 SCREENS_PATH = CONFIG_PATH.with_name("screens.json")
 CLOCK_LAYOUT_PATH = CONFIG_PATH.with_name("clock_layout")
+DESIGN_DATA_DIR = CONFIG_PATH.parent
+
+
+def design_path(screen):
+    if type(screen) is not int or screen not in SCREEN_DESIGNS:
+        raise ValueError("Dieser Screen bietet keine Designauswahl")
+    return DESIGN_DATA_DIR / f"screen_design_{screen}"
+
+
+def load_screen_design(screen):
+    path = design_path(screen)
+    try:
+        value = path.read_text().strip()
+    except FileNotFoundError:
+        return 0
+    if not value.isascii() or not value.isdecimal() or not 0 <= int(value) < 20:
+        raise ValueError(f"Ungültiges Screen-Design für {SCREENS[screen]} (erwartet: 0 bis 19)")
+    return int(value)
+
+
+def save_screen_design(screen, index):
+    path = design_path(screen)
+    if type(index) is not int or not 0 <= index < len(SCREEN_DESIGNS[screen]):
+        raise ValueError("Unbekanntes Screen-Design")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(f"{index}\n")
+    temporary.replace(path)
 
 
 def load_clock_layout():
@@ -94,8 +150,9 @@ def action_labels():
 def default_bindings(screens=None):
     result = {str(screen): {f"L{key}": "none" for key in range(2, 6)}
               for screen in (load_screens() if screens is None else screens)}
-    result["3"] = dict(zip(("L2", "L3", "L4", "L5"),
-                          ("previous", "next", "play", "pause")))
+    for screen in SCREEN_DESIGNS:
+        result[str(screen)].update(L2="design_previous", L3="design_next")
+    result["3"].update(L4="play", L5="pause")
     result["1"].update(L2="clock_previous", L3="clock_next")
     return result
 
@@ -193,6 +250,13 @@ def select_player():
 
 def perform_action(action):
     if action == "none":
+        return
+    if action in DESIGN_ACTIONS:
+        screen = read_screen()
+        if screen not in SCREEN_DESIGNS:
+            raise ValueError("Screen-Designs sind nur auf System, Medien, Spiele und Netzwerk verfügbar")
+        step = 1 if action == "design_next" else -1
+        save_screen_design(screen, (load_screen_design(screen) + step) % len(SCREEN_DESIGNS[screen]))
         return
     if action in CLOCK_ACTIONS:
         if read_screen() != 1:

@@ -1,0 +1,15 @@
+[Unit]
+Description=G510s temporary per-game keyboard colors
+After=g510-backlight.service graphical-session.target
+Wants=g510-backlight.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStartPre=/bin/bash "__PROJECT_DIR__/scripts/restore-backlight.sh" --user
+ExecStart=/usr/bin/python3 "__PROJECT_DIR__/src/g510_game_colors.py"
+ExecStopPost=/bin/bash "__PROJECT_DIR__/scripts/restore-backlight.sh" --user
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

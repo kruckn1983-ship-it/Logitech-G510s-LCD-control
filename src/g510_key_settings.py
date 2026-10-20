@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
 
 from g510_screen_keys import (
     action_labels, load_screens, load_bindings, save_bindings, show_screen, CLOCK_ACTIONS,
+    DESIGN_ACTIONS, SCREEN_DESIGNS,
 )
 
 
@@ -83,6 +84,10 @@ class ScreenKeysTab(QWidget):
                 item = combo.model().item(combo.findData(action))
                 if item is not None:
                     item.setEnabled(self.screen.currentData() == 1)
+            for action in DESIGN_ACTIONS:
+                item = combo.model().item(combo.findData(action))
+                if item is not None:
+                    item.setEnabled(self.screen.currentData() in SCREEN_DESIGNS)
 
     def save(self):
         if self.bindings is None:

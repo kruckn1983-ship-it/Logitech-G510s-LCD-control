@@ -1,0 +1,14 @@
+[Unit]
+Description=G510s restore saved keyboard backlight at login
+After=default.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash "__PROJECT_DIR__/scripts/restore-backlight.sh" --user
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

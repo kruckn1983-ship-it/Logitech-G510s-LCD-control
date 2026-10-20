@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QGridLayout, QComboBox, QPushButton, QLabel,
     QMessageBox, QDialog, QLineEdit, QSpinBox, QFrame, QScrollArea,
     QFileDialog, QInputDialog, QStatusBar, QListWidget, QListWidgetItem,
-    QCheckBox, QSizePolicy, QShortcut,
+    QCheckBox, QSizePolicy, QShortcut, QMenu, QColorDialog,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QProcess
 from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QFontMetrics, QKeySequence
@@ -68,11 +68,13 @@ from g510_screen_canvas import (
 import g510_layout_store as layout_store
 from g510_layout_store import GAME_DASHBOARD_COMPONENTS
 import g510_preview as preview_renderer
-from g510_key_settings import ScreenKeysTab
+import g510_game_colors as game_colors
 from g510_screen_keys import (
-    action_labels, load_bindings, next_screen, show_screen, read_screen,
+    action_labels, load_bindings, save_bindings, CLOCK_ACTIONS,
+    next_screen, show_screen, read_screen, perform_action,
     load_screens, load_screen_catalog, save_screen_catalog,
     CLOCK_LAYOUTS, load_clock_layout, save_clock_layout,
+    DESIGN_ACTIONS, SCREEN_DESIGNS, load_screen_design, save_screen_design,
 )
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
@@ -253,6 +255,8 @@ def set_as_default(rgb):
 
 
 ALL_SERVICES = [
+    "g510-game-colors.service",
+    "g510-backlight.service",
     "g510-lcd-stats.service",
     "g510-lcd-buttons.service",
     "g510-macro-daemon.service",
@@ -511,6 +515,13 @@ class KeyboardTab(QWidget):
         title = QLabel("Beleuchtung")
         title.setObjectName("Title")
         panel_layout.addWidget(title)
+        try:
+            standard_rgb = game_colors.load_standard_color(DEFAULTS_SCRIPT_DATA_DIR)
+        except (OSError, ValueError) as error:
+            standard_rgb = None
+            warning = QLabel(f"Standardfarbe konnte nicht geladen werden: {error}")
+            warning.setWordWrap(True)
+            panel_layout.addWidget(warning)
 
         # Swatch-grid + hex-entry picker, matching the sibling G910
         # app's own picker (direct request: "a colour picker like you
@@ -519,7 +530,7 @@ class KeyboardTab(QWidget):
         # existing Apply/Set as Default buttons below act on, keeping
         # G510s's own already-working live/persist distinction (G910's
         # picker has no separate "default" concept to preserve).
-        self._pending_rgb = current_rgb or next(iter(COLOR_RGB.values()))
+        self._pending_rgb = standard_rgb or current_rgb or next(iter(COLOR_RGB.values()))
 
         panel_layout.addWidget(QLabel("Farbe"))
         self.preview_swatch = QLabel()
@@ -587,9 +598,9 @@ class KeyboardTab(QWidget):
         service_row = QHBoxLayout()
         service_row.setSpacing(4)
         service_tooltips = {
-            "start": "Alle 3 G510-Dienste (LCD-Statistik, Tasten, Makros) starten, falls sie nicht laufen",
-            "stop": "Alle 3 G510-Dienste beenden – LCD, Tasten und Makros reagieren dann nicht mehr",
-            "restart": "Alle 3 G510-Dienste neu starten – nützlich, wenn eine Konfigurationsänderung nicht übernommen wird",
+            "start": "G510-Dienste für LCD, Tasten, Makros und Beleuchtung starten",
+            "stop": "G510-Dienste beenden; die gespeicherte Standardfarbe wird wiederhergestellt",
+            "restart": "G510-Dienste einschließlich der Spielfarben neu starten",
         }
         for label, action in (("Starten", "start"), ("Stoppen", "stop"), ("Neustart", "restart")):
             btn = QPushButton(label)
@@ -813,6 +824,7 @@ class CustomScreensTab(QWidget):
         self.game_dashboard_offsets = load_game_dashboard_offsets()
         self._game_dashboard_elements = {}
         self._element_rows = []
+        self._design_index = 0
 
         root = QHBoxLayout()
         root.setContentsMargins(16, 14, 16, 14)
@@ -858,6 +870,21 @@ class CustomScreensTab(QWidget):
         clock_row.addWidget(next_clock)
         self.clock_layout_row.hide()
         canvas_col.addWidget(self.clock_layout_row)
+        self.design_row = QWidget()
+        design_row = QHBoxLayout(self.design_row)
+        design_row.setContentsMargins(0, 0, 0, 0)
+        design_row.addWidget(QLabel("Screen-Design:"))
+        previous_design = QPushButton("Zurück")
+        previous_design.clicked.connect(lambda: self.cycle_screen_design(-1))
+        design_row.addWidget(previous_design)
+        self.design_combo = QComboBox()
+        self.design_combo.activated.connect(self.on_screen_design_selected)
+        design_row.addWidget(self.design_combo, 1)
+        next_design = QPushButton("Weiter")
+        next_design.clicked.connect(lambda: self.cycle_screen_design(1))
+        design_row.addWidget(next_design)
+        canvas_col.addWidget(self.design_row)
+        self.populate_design_choices()
         device_grid = QGridLayout()
         device_grid.setHorizontalSpacing(12)
         device_grid.setVerticalSpacing(10)
@@ -870,12 +897,28 @@ class CustomScreensTab(QWidget):
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(10)
         self.function_buttons = {}
+        self.function_menu_buttons = {}
+        self.key_bindings = None
         for key in ("L2", "L3", "L4", "L5"):
             button = QPushButton(key)
-            button.setEnabled(False)
             button.setMinimumHeight(46)
-            buttons_row.addWidget(button)
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False, current_key=key:
+                                   self.execute_function_binding(current_key))
+            menu_button = QPushButton("Belegung ändern")
+            menu_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            menu_button.setToolTip(f"Aktion für {key} auswählen, ohne sie auszuführen.")
+            menu = QMenu(menu_button)
+            menu.aboutToShow.connect(
+                lambda current_key=key: self.populate_function_menu(current_key))
+            menu_button.setMenu(menu)
+            column = QVBoxLayout()
+            column.setSpacing(5)
+            column.addWidget(button)
+            column.addWidget(menu_button)
+            buttons_row.addLayout(column, 1)
             self.function_buttons[key] = button
+            self.function_menu_buttons[key] = menu_button
 
         # Painting and hit testing share the same aspect-preserving transform.
         self.preview_canvas = ScreenPreviewCanvas()
@@ -1115,6 +1158,7 @@ class CustomScreensTab(QWidget):
         elements_container.setLayout(self.elements_layout)
         panel_layout.addWidget(elements_container, stretch=1)
         panel.setLayout(panel_layout)
+        self.editor_panel = panel
         # Das ganze Panel scrollt, wenn das Fenster zu niedrig ist, und
         # darf bei breiten Fenstern etwas wachsen.
         panel_scroll = QScrollArea()
@@ -1130,6 +1174,7 @@ class CustomScreensTab(QWidget):
 
         self.on_sensor_changed()
         self.refresh_elements_list()
+        self.refresh_function_buttons()
         self.refresh_preview()
 
         # Keeps the preview live (matches the real daemon's own refresh
@@ -1270,6 +1315,7 @@ class CustomScreensTab(QWidget):
     def select_screen(self, key):
         self.current_screen = key
         self.clock_layout_row.setVisible(key == "L1")
+        self.populate_design_choices()
         self.refresh_function_buttons()
         self.drag_hint.setText(
             "Während ein Spiel läuft, Logo/Titel oder CPU-/GPU-Block in der Vorschau ziehen, "
@@ -1343,13 +1389,72 @@ class CustomScreensTab(QWidget):
             bindings = load_bindings()
             labels = action_labels()
         except (OSError, ValueError) as error:
+            self.key_bindings = None
             for key, button in self.function_buttons.items():
                 button.setText(f"{key}\nBelegungsfehler")
-                button.setToolTip(str(error))
+                button.setToolTip(
+                    f"{error}\nBelegung über das Menü darunter erneut laden.")
             return
+        self.key_bindings = bindings
         for key, button in self.function_buttons.items():
             button.setText(f"{key}\n{labels[bindings[screen][key]]}")
-            button.setToolTip("Belegung unter „LCD-Tasten“ ändern. Hier nur Vorschau.")
+            button.setToolTip(
+                f"{key}: Ausgewählte Aktion für diesen Bildschirm jetzt ausführen. "
+                "Die Belegung lässt sich im Menü darunter ändern. "
+                "Mediensteuerung benötigt einen MPRIS-Player.")
+
+    def execute_function_binding(self, key):
+        try:
+            bindings = load_bindings()
+            action = bindings[str(self.screen_number())][key]
+            self.apply_selected_screen()
+            perform_action(action)
+            target = f"L{read_screen()}"
+            if target != self.current_screen:
+                self.select_screen(target)
+            else:
+                self.refresh_preview()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            QMessageBox.warning(self, "LCD-Tasten", f"{key}: Aktion fehlgeschlagen: {error}")
+        self.refresh_function_buttons()
+
+    def populate_function_menu(self, key):
+        menu = self.function_menu_buttons[key].menu()
+        menu.clear()
+        screen = self.screen_number()
+        try:
+            bindings = load_bindings()
+            labels = action_labels()
+        except (OSError, ValueError) as error:
+            self.key_bindings = None
+            item = menu.addAction(f"Belegung konnte nicht geladen werden: {error}")
+            item.setEnabled(False)
+            menu.addAction("Erneut laden", self.refresh_function_buttons)
+            return
+        self.key_bindings = bindings
+        selected = bindings[str(screen)][key]
+        for action, label in labels.items():
+            item = menu.addAction(label)
+            item.setData(action)
+            item.setCheckable(True)
+            item.setChecked(action == selected)
+            item.setEnabled(
+                (action not in CLOCK_ACTIONS or screen == 1) and
+                (action not in DESIGN_ACTIONS or screen in SCREEN_DESIGNS))
+            item.triggered.connect(
+                lambda checked=False, target=action, target_screen=screen:
+                self.save_function_binding(target_screen, key, target))
+
+    def save_function_binding(self, screen, key, action):
+        try:
+            # Reload so editing one key cannot overwrite externally changed bindings.
+            bindings = load_bindings()
+            bindings[str(screen)][key] = action
+            save_bindings(bindings)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(
+                self, "LCD-Tasten", f"Speichern fehlgeschlagen: {error}")
+        self.refresh_function_buttons()
 
     def on_sensor_changed(self):
         sensor_key = self.sensor_combo.currentData()
@@ -1859,10 +1964,10 @@ class CustomScreensTab(QWidget):
         self._element_rows = []
         self.on_preview_element_hovered(-1)
 
-        if self.current_screen == "L1":
+        if self.current_screen == "L1" or self._design_index != 0:
             self.fix_overflow_btn.hide()
-            info = QLabel("Die Uhr bietet 20 fertige Designs. Oben auswählen oder im Uhr-Screen "
-                          "mit L2/L3 blättern. Die einzelnen Bestandteile sind nicht frei verschiebbar.")
+            info = QLabel("Fertige Designs sind nicht frei verschiebbar. Oben auswählen "
+                          "oder mit L2/L3 blättern. Design 1 erhält deine eigenen Elemente.")
             info.setWordWrap(True)
             info.setObjectName("Status")
             self.elements_layout.addWidget(info)
@@ -2082,7 +2187,65 @@ class CustomScreensTab(QWidget):
             QMessageBox.critical(self, "Uhr-Design", str(error))
         self.refresh_preview()
 
+    def populate_design_choices(self):
+        names = SCREEN_DESIGNS.get(self.screen_number(), ())
+        self.design_row.setVisible(bool(names))
+        self.design_combo.clear()
+        for index, name in enumerate(names):
+            self.design_combo.addItem(f"{index + 1:02d} / {len(names)} · {name}", index)
+
+    def on_screen_design_selected(self):
+        try:
+            save_screen_design(self.screen_number(), self.design_combo.currentData())
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Screen-Design", f"Speichern fehlgeschlagen: {error}")
+        self.refresh_preview()
+
+    def cycle_screen_design(self, step):
+        try:
+            screen = self.screen_number()
+            save_screen_design(screen, (load_screen_design(screen) + step) % len(SCREEN_DESIGNS[screen]))
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Screen-Design", str(error))
+        self.refresh_preview()
+
     def refresh_preview(self):
+        design = 0
+        if self.screen_number() in SCREEN_DESIGNS:
+            try:
+                design = load_screen_design(self.screen_number())
+            except (OSError, ValueError) as error:
+                self._design_index = -1
+                self.editor_panel.setEnabled(False)
+                self.drag_hint.setText(f"Screen-Design konnte nicht geladen werden: {error}")
+                self.refresh_elements_list()
+                self.preview_canvas.set_data(None, [])
+                return
+            self.design_combo.setCurrentIndex(design)
+        self.editor_panel.setEnabled(design == 0 and self.current_screen != "L1")
+        if self._design_index != design:
+            self._design_index = design
+            self.refresh_elements_list()
+            if design == 0 and self.screen_number() in SCREEN_DESIGNS:
+                self.drag_hint.setText(
+                    "Design 1: Dein bisheriges Layout bleibt frei bearbeitbar. "
+                    "L2/L3 oder die Auswahl oben wechseln zu den fertigen Designs.")
+        if design:
+            self.drag_hint.setText(
+                "20 Screen-Designs: L2 zurück / L3 weiter (Standardbelegung). "
+                "Fertige Designs sind schreibgeschützt. Design 1 erhält dein bearbeitbares Layout.")
+            if self.current_screen == "L4":
+                self.drag_hint.setText(
+                    "20 Warteanimationen: L2 zurück / L3 weiter. Ohne laufendes Spiel "
+                    "wird die gewählte Animation gezeigt; im Spiel weiterhin Logo/Titel.")
+            elif self.current_screen == "L3":
+                self.drag_hint.setText(
+                    "20 Warteanimationen: L2 zurück / L3 weiter. Ohne Medien wird die "
+                    "gewählte Animation gezeigt; bei Wiedergabe oder Pause weiterhin Titel und Player.")
+        if hasattr(self, "preview_timer"):
+            interval = 250 if self.current_screen in ("L3", "L4") and design > 0 else 1000
+            if self.preview_timer.interval() != interval:
+                self.preview_timer.setInterval(interval)
         if self.current_screen == "L1":
             try:
                 index = load_clock_layout()
@@ -2106,12 +2269,12 @@ class CustomScreensTab(QWidget):
             LCD_WIDTH * PREVIEW_SCALE, LCD_HEIGHT * PREVIEW_SCALE,
             Qt.KeepAspectRatio, Qt.FastTransformation,
         )
-        elements = self.config.get(self.current_screen, [])  # L1 isn't a key in self.config -- no draggable elements there
+        elements = [] if design else self.config.get(self.current_screen, [])
         game_bounds = {
             component: bounds.get(GAME_BOUNDS_BASE + index)
             for index, component in enumerate(GAME_DASHBOARD_COMPONENTS)
         }
-        if self.current_screen == "L4" and game_bounds["cpu"] and game_bounds["gpu"]:
+        if self.current_screen == "L4" and not design and game_bounds["cpu"] and game_bounds["gpu"]:
             elements = []
             for component, bound_index in zip(GAME_DASHBOARD_COMPONENTS, range(GAME_BOUNDS_BASE, GAME_BOUNDS_BASE + 3)):
                 bound = bounds.get(bound_index)
@@ -2131,7 +2294,7 @@ class CustomScreensTab(QWidget):
             self.drag_hint.setText(
                 "Spieldashboard aktiv: Logo/Titel oder CPU-/GPU-Block ziehen, um es zu positionieren."
             )
-        elif self.current_screen == "L4":
+        elif self.current_screen == "L4" and not design:
             self.drag_hint.setText(
                 "L4-Layoutelemente hier ziehen. Während ein Spiel läuft, wird stattdessen das "
                 "automatische Spieldashboard angezeigt."
@@ -2184,6 +2347,18 @@ class GameLogosTab(QWidget):
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setStyleSheet("background:#c0d796;border:1px solid #555;")
         self.source_label = QLabel("")
+        self.game_color_label = QLabel()
+        self.game_color_label.setWordWrap(True)
+        self.game_color_button = QPushButton("Tastaturfarbe für dieses Spiel wählen...")
+        self.game_color_button.clicked.connect(self.choose_game_color)
+        self.clear_game_color_button = QPushButton("Keine eigene Spielfarbe")
+        self.clear_game_color_button.clicked.connect(self.clear_game_color)
+        color_note = QLabel(
+            "Das Spiel im Vordergrund bestimmt die Farbe. Ohne Spielfokus bleibt "
+            "die bisherige Spielfarbe, solange dieses Spiel läuft. Nach Spielende "
+            "kehrt die gespeicherte Standardfarbe zurück. Funktioniert auch ohne "
+            "geöffnetes Tool (KDE/KWin oder X11).")
+        color_note.setWordWrap(True)
         self.optimize_logo = QCheckBox("Für LCD optimieren (160×43, Schwarz-Weiß)")
         self.optimize_logo.setToolTip(
             "Entfernt leere Ränder und passt Kontrast und Schwarz-Weiß-Schwelle an. "
@@ -2202,13 +2377,16 @@ class GameLogosTab(QWidget):
             "Das LCD verwendet es beim nächsten Start des Spiels.")
         hint.setWordWrap(True)
         for w in (self.title_label, self.preview, self.source_label,
-                  self.optimize_logo, self.choose_btn, self.reset_btn, hint):
+                  self.optimize_logo, self.choose_btn, self.reset_btn, hint,
+                  self.game_color_label, self.game_color_button,
+                  self.clear_game_color_button, color_note):
             right.addWidget(w)
         right.addStretch(1)
         layout.addLayout(right, 2)
         self.choose_btn.setEnabled(False)
         self.reset_btn.setEnabled(False)
         self.optimize_logo.setEnabled(False)
+        self.refresh_game_color()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2284,6 +2462,7 @@ class GameLogosTab(QWidget):
 
     def update_detail(self, *_):
         appid = self.current_appid()
+        self.refresh_game_color()
         self.choose_btn.setEnabled(appid is not None)
         has_custom = appid is not None and (self.custom_dir / f"{appid}.png").is_file()
         self.optimize_logo.setEnabled(has_custom)
@@ -2311,6 +2490,49 @@ class GameLogosTab(QWidget):
             self.preview.setText("Noch kein Logo erzeugt – in einem Moment erneut auswählen")
         else:
             self.preview.setPixmap(QPixmap.fromImage(pix))
+
+    def refresh_game_color(self):
+        appid = self.current_appid()
+        self.game_color_button.setEnabled(appid is not None)
+        self.clear_game_color_button.setEnabled(False)
+        try:
+            color = game_colors.load_colors().get(str(appid))
+        except (OSError, ValueError) as error:
+            self.game_color_label.setText(f"Spielfarbe konnte nicht geladen werden: {error}")
+            return
+        self.clear_game_color_button.setEnabled(color is not None)
+        self.game_color_label.setText(
+            "Tastaturfarbe: " + QColor(*color).name().upper() if color else
+            "Tastaturfarbe: keine eigene Farbe")
+        self.game_color_label.setStyleSheet(
+            f"border-left: 12px solid {QColor(*color).name()}; padding-left: 8px;"
+            if color else "")
+
+    def choose_game_color(self):
+        appid = self.current_appid()
+        if appid is None:
+            return
+        try:
+            current = game_colors.load_colors().get(str(appid))
+            color = QColorDialog.getColor(
+                QColor(*current) if current else QColor("#ffffff"), self,
+                f"Tastaturfarbe: {self.games[appid]}")
+            if not color.isValid():
+                return
+            game_colors.save_color(appid, (color.red(), color.green(), color.blue()))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Spielfarbe", f"Speichern fehlgeschlagen: {error}")
+        self.refresh_game_color()
+
+    def clear_game_color(self):
+        appid = self.current_appid()
+        if appid is None:
+            return
+        try:
+            game_colors.save_color(appid, None)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Spielfarbe", f"Entfernen fehlgeschlagen: {error}")
+        self.refresh_game_color()
 
     def convert(self, appid, custom, optimized=None):
         """Regenerates the cached .bin/.size exactly like the service does."""
@@ -2444,8 +2666,8 @@ class OverviewTab(QWidget):
         self.error.setTextFormat(Qt.PlainText)
         layout.addWidget(self.error)
         actions = QHBoxLayout()
-        for name, index in (("LCD-Bildschirme gestalten", 1), ("LCD-Tasten belegen", 2),
-                            ("Tastatur && Profile", 3)):
+        for name, index in (("LCD-Bildschirme gestalten", 1), ("LCD-Tasten belegen", 1),
+                            ("Tastatur && Profile", 2)):
             button = QPushButton(name)
             button.clicked.connect(lambda checked=False, target=index: self.navigate.emit(target))
             actions.addWidget(button)
@@ -2496,17 +2718,13 @@ class MainWindow(QMainWindow):
 
         self.overview_tab = OverviewTab()
         self.logos_tab = GameLogosTab()
-        self.keys_tab = ScreenKeysTab()
-        self.custom_tab.screens_changed.connect(self.keys_tab.reload)
-        self.keys_tab.bindings_changed.connect(self.custom_tab.refresh_function_buttons)
-        self.page_widgets = [self.overview_tab, self.custom_tab, self.keys_tab,
+        self.page_widgets = [self.overview_tab, self.custom_tab,
                              self.keyboard_tab, self.logos_tab]
-        titles = ["Übersicht", "LCD-Bildschirme", "LCD-Tasten", "Tastatur & Profile",
+        titles = ["Übersicht", "LCD-Bildschirme", "Tastatur & Profile",
                   "Spiel-Logos"]
         descriptions = [
             "Deine Tastatur und die aktuelle LCD-Anzeige im Überblick.",
-            "Bildschirm auswählen, Elemente hinzufügen und direkt in der Vorschau anordnen.",
-            "Die Funktionen von L2 bis L5 für jeden Bildschirm festlegen.",
+            "Bildschirm gestalten und die Funktionen von L2 bis L5 direkt unter der Vorschau festlegen.",
             "Beleuchtung, Profile und G-Tasten-Makros verwalten.",
             "Automatische Spielanzeigen und eigene Logos verwalten.",
         ]
@@ -2705,9 +2923,9 @@ class MainWindow(QMainWindow):
             problems.append(f"Makros: {e}")
 
         try:
-            if self.keys_tab.bindings is None:
+            if self.custom_tab.key_bindings is None:
                 problems.append("LCD-Tasten: Belegung konnte nicht geladen werden")
-            elif load_bindings() != self.keys_tab.bindings:
+            elif load_bindings() != self.custom_tab.key_bindings:
                 problems.append("LCD-Tasten: gespeicherte Belegung weicht von der Anzeige ab")
             else:
                 detail_lines.append("    LCD-Tasten: Belegung bestätigt")
@@ -2719,12 +2937,6 @@ class MainWindow(QMainWindow):
             active_tab = self.page_widgets[self.pages.currentIndex()]
             if active_tab is self.custom_tab:
                 selected_screen = self.custom_tab.apply_selected_screen()
-            elif active_tab is self.keys_tab:
-                screen = self.keys_tab.screen.currentData()
-                show_screen(screen)
-                if read_screen() != screen:
-                    raise OSError("Die Bildschirmwahl konnte nicht bestätigt werden.")
-                selected_screen = self.keys_tab.screen.currentText()
         except (OSError, ValueError) as error:
             problems.append(f"Bildschirmwechsel: {error}")
 

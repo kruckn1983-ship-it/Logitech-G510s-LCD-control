@@ -34,6 +34,11 @@ class InterfaceTests(unittest.TestCase):
             patch.dict(os.environ, XDG_RUNTIME_DIR=str(self.root)),
             patch.object(keys, "SCREENS_PATH", self.root / "screens.json"),
             patch.object(keys, "CLOCK_LAYOUT_PATH", self.root / "clock_layout"),
+            patch.object(keys, "DESIGN_DATA_DIR", self.root),
+            patch.object(gui, "load_bindings",
+                         side_effect=lambda: keys.load_bindings(self.root / "lcd_keys.json")),
+            patch.object(gui, "save_bindings",
+                         side_effect=lambda data: keys.save_bindings(data, self.root / "lcd_keys.json")),
             patch.object(gui, "CUSTOM_SCREENS_FILE", self.root / "custom_screens.txt"),
             patch.object(gui, "load_custom_screens", return_value={
                 "L2": [], "L3": [], "L4": [], "L5": []}),
@@ -70,7 +75,8 @@ class InterfaceTests(unittest.TestCase):
 
     def test_navigation_keeps_pages_and_visibility_timers_in_sync(self):
         window = self.window()
-        self.assertEqual(window.navigation.count(), 5)
+        self.assertEqual(window.navigation.count(), 4)
+        self.assertFalse(hasattr(window, "keys_tab"))
         self.assertFalse(hasattr(window, "cooling_tab"))
         self.assertTrue(window.overview_tab.timer.isActive())
         self.assertFalse(window.custom_tab.preview_timer.isActive())
@@ -83,7 +89,7 @@ class InterfaceTests(unittest.TestCase):
             self.assertTrue(page.isVisible())
             self.assertEqual(window.overview_tab.timer.isActive(), index == 0)
             self.assertEqual(window.custom_tab.preview_timer.isActive(), index == 1)
-            self.assertEqual(window.keyboard_tab.lcd_mirror_timer.isActive(), index == 3)
+            self.assertEqual(window.keyboard_tab.lcd_mirror_timer.isActive(), index == 2)
             self.assertTrue(window.save_all_btn.isVisible())
         window.navigation.setCurrentRow(0)
         window.overview_tab.navigate.emit(2)
@@ -97,7 +103,7 @@ class InterfaceTests(unittest.TestCase):
             window.resize(width, height)
             self.app.processEvents()
             self.assertEqual((window.width(), window.height()), (width, height))
-            for index in range(5):
+            for index in range(4):
                 window.navigation.setCurrentRow(index)
                 self.app.processEvents()
                 scroll = window.pages.currentWidget()
@@ -330,6 +336,75 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(tab.clock_layout_row.isVisible())
         self.assertEqual(keys.load_clock_layout(), 7)
 
+    def test_screen_design_controls_sync_hardware_and_preserve_editable_layout(self):
+        window = self.window()
+        window.navigation.setCurrentRow(1)
+        tab = window.custom_tab
+        original = {"kind": "sensor", "sensor": "CPU_PCT", "style": "number",
+                    "x": 1, "y": 1}
+        tab.config["L2"] = [original]
+        for screen in (2, 3, 4, 5):
+            tab.select_screen(f"L{screen}")
+            self.assertTrue(tab.design_row.isVisible())
+            self.assertEqual(tab.design_combo.count(), 20)
+            self.assertEqual(tab.design_combo.currentData(), 0)
+            tab.cycle_screen_design(-1)
+            self.assertEqual(keys.load_screen_design(screen), 19)
+            self.assertFalse(tab.editor_panel.isEnabled())
+            self.assertEqual(tab.preview_canvas._elements, [])
+            self.assertIn("Warteanimationen" if screen in (3, 4) else "schreibgeschützt",
+                          tab.drag_hint.text())
+            self.assertEqual(tab.preview_timer.interval(), 250 if screen in (3, 4) else 1000)
+            keys.save_screen_design(screen, 7)
+            with patch.object(gui, "save_screen_design") as save:
+                tab.refresh_preview()
+            save.assert_not_called()
+            self.assertEqual(tab.design_combo.currentData(), 7)
+            tab.design_combo.setCurrentIndex(0)
+            tab.on_screen_design_selected()
+            self.assertTrue(tab.editor_panel.isEnabled())
+            tab.populate_function_menu("L2")
+            entries = {item.data(): item for item in tab.function_menu_buttons["L2"].menu().actions()}
+            self.assertTrue(entries["design_previous"].isEnabled())
+            self.assertTrue(entries["design_previous"].isChecked())
+        self.assertEqual(tab.config["L2"], [original])
+        tab.select_screen("L2")
+        self.assertEqual(tab.preview_canvas._elements, [original])
+        tab.select_screen("L1")
+        self.assertFalse(tab.design_row.isVisible())
+        tab.populate_function_menu("L2")
+        entries = {item.data(): item for item in tab.function_menu_buttons["L2"].menu().actions()}
+        self.assertFalse(entries["design_next"].isEnabled())
+        keys.save_screen_catalog({"next_id": 7, "screens": [{"id": 6, "name": "Testscreen"}]})
+        tab.config["L6"] = []
+        tab.refresh_screen_choices()
+        tab.select_screen("L6")
+        self.assertFalse(tab.design_row.isVisible())
+        self.assertTrue(tab.editor_panel.isEnabled())
+        tab.populate_function_menu("L2")
+        entries = {item.data(): item for item in tab.function_menu_buttons["L2"].menu().actions()}
+        self.assertFalse(entries["design_next"].isEnabled())
+
+    def test_screen_design_errors_clear_preview_and_can_be_repaired(self):
+        tab = self.window().custom_tab
+        keys.design_path(2).write_text("broken")
+        tab.refresh_preview()
+        self.assertFalse(tab.editor_panel.isEnabled())
+        self.assertIsNone(tab.preview_canvas._pixmap)
+        self.assertIn("konnte nicht geladen", tab.drag_hint.text())
+        with patch.object(gui.QMessageBox, "critical") as message:
+            tab.cycle_screen_design(1)
+        message.assert_called_once()
+        self.assertEqual(keys.design_path(2).read_text(), "broken")
+        tab.design_combo.setCurrentIndex(3)
+        tab.on_screen_design_selected()
+        self.assertEqual(keys.load_screen_design(2), 3)
+        with patch.object(gui, "save_screen_design", side_effect=PermissionError("Testzugriff")), \
+                patch.object(gui.QMessageBox, "critical") as message:
+            tab.cycle_screen_design(1)
+        message.assert_called_once()
+        self.assertEqual(tab.design_combo.currentData(), 3)
+
     def test_clock_layout_io_errors_are_visible_and_never_saved_as_default(self):
         tab = self.window().custom_tab
         tab.select_screen("L1")
@@ -366,11 +441,118 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
             self.assertTrue(window.custom_tab.clock_layout_combo.isVisible())
 
-    def test_invalid_bindings_keep_key_panel_disabled_without_crashing(self):
-        with patch("g510_key_settings.load_bindings", side_effect=ValueError("Testbelegung defekt")):
+    def test_invalid_bindings_are_reported_in_buttons_and_menu_without_crashing(self):
+        with patch.object(gui, "load_bindings", side_effect=ValueError("Testbelegung defekt")):
             window = self.window()
-        self.assertIn("Testbelegung defekt", window.keys_tab.status.text())
-        self.assertTrue(all(not combo.isEnabled() for combo in window.keys_tab.combos.values()))
+            tab = window.custom_tab
+            self.assertIsNone(tab.key_bindings)
+            self.assertIn("Testbelegung defekt", tab.function_buttons["L2"].toolTip())
+            tab.populate_function_menu("L2")
+            actions = tab.function_menu_buttons["L2"].menu().actions()
+            self.assertIn("Testbelegung defekt", actions[0].text())
+            self.assertFalse(actions[0].isEnabled())
+        tab.refresh_function_buttons()
+        self.assertIsNotNone(tab.key_bindings)
+        self.assertNotIn("Belegungsfehler", tab.function_buttons["L2"].text())
+
+    def test_function_button_menus_save_only_selected_key_without_running_action(self):
+        window = self.window()
+        tab = window.custom_tab
+        tab.select_screen("L3")
+        original = keys.default_bindings()
+        with patch.object(gui, "perform_action") as execute:
+            for key, action in (("L2", "mute"), ("L3", "volume_up"),
+                                ("L4", "play_pause"), ("L5", "screen_5")):
+                tab.populate_function_menu(key)
+                menu = tab.function_menu_buttons[key].menu()
+                self.assertTrue(tab.function_buttons[key].isEnabled())
+                entries = {item.data(): item for item in menu.actions()}
+                self.assertTrue(entries[original["3"][key]].isChecked())
+                self.assertFalse(entries["clock_next"].isEnabled())
+                entries[action].trigger()
+                original["3"][key] = action
+                self.assertEqual(gui.load_bindings(), original)
+                self.assertIn(keys.action_labels()[action], tab.function_buttons[key].text())
+            execute.assert_not_called()
+        tab.select_screen("L1")
+        tab.populate_function_menu("L2")
+        entries = {item.data(): item for item in tab.function_menu_buttons["L2"].menu().actions()}
+        self.assertTrue(entries["clock_previous"].isEnabled())
+        self.assertTrue(entries["clock_previous"].isChecked())
+        self.assertEqual(gui.load_bindings()["1"]["L2"], "clock_previous")
+
+    def test_binding_menu_preserves_external_changes_and_handles_save_failure(self):
+        tab = self.window().custom_tab
+        tab.populate_function_menu("L2")
+        menu = tab.function_menu_buttons["L2"].menu()
+        external = gui.load_bindings()
+        external["2"]["L3"] = "volume_up"
+        gui.save_bindings(external)
+        next(item for item in menu.actions() if item.data() == "mute").trigger()
+        self.assertEqual(gui.load_bindings()["2"]["L3"], "volume_up")
+        self.assertEqual(gui.load_bindings()["2"]["L2"], "mute")
+        before = gui.load_bindings()
+        with patch.object(gui, "save_bindings", side_effect=PermissionError("read only")), \
+                patch.object(gui.QMessageBox, "critical") as message:
+            tab.save_function_binding(2, "L2", "play")
+        message.assert_called_once()
+        self.assertEqual(gui.load_bindings(), before)
+        self.assertIn("Stumm umschalten", tab.function_buttons["L2"].text())
+
+    def test_function_clicks_execute_design_and_clock_actions_on_selected_screen(self):
+        window = self.window()
+        window.navigation.setCurrentRow(1)
+        tab = window.custom_tab
+        for screen in (2, 3, 4, 5, 1):
+            tab.select_screen(f"L{screen}")
+            self.assertIsNone(tab.function_buttons["L3"].menu())
+            self.assertIsNotNone(tab.function_menu_buttons["L3"].menu())
+            keys.show_screen(5 if screen == 1 else 1)
+            tab.function_buttons["L3"].click()
+            self.assertEqual(keys.read_screen(), screen)
+            self.assertEqual(keys.load_clock_layout() if screen == 1
+                             else keys.load_screen_design(screen), 1)
+            tab.function_buttons["L2"].click()
+            self.assertEqual(keys.load_clock_layout() if screen == 1
+                             else keys.load_screen_design(screen), 0)
+            upper = tab.function_buttons["L3"]
+            lower = tab.function_menu_buttons["L3"]
+            self.app.processEvents()
+            self.assertGreater(lower.mapTo(tab, QPoint(0, 0)).y(),
+                               upper.mapTo(tab, QPoint(0, upper.height())).y())
+
+    def test_function_click_reloads_binding_executes_once_and_reports_failures(self):
+        tab = self.window().custom_tab
+        bindings = gui.load_bindings()
+        bindings["2"]["L4"] = "mute"
+        gui.save_bindings(bindings)
+        with patch.object(gui, "perform_action") as execute:
+            tab.function_buttons["L4"].click()
+        execute.assert_called_once_with("mute")
+        bindings["2"]["L4"] = "screen_5"
+        gui.save_bindings(bindings)
+        tab.function_buttons["L4"].click()
+        self.assertEqual(tab.current_screen, "L5")
+        self.assertEqual(keys.read_screen(), 5)
+        with patch.object(gui, "perform_action", side_effect=RuntimeError("Kein Player")), \
+                patch.object(gui.QMessageBox, "warning") as message:
+            tab.function_buttons["L4"].click()
+        self.assertIn("Kein Player", message.call_args.args[2])
+        with patch.object(gui, "load_bindings", side_effect=ValueError("Defekte Belegung")), \
+                patch.object(gui, "perform_action") as execute, \
+                patch.object(gui.QMessageBox, "warning") as message:
+            tab.function_buttons["L2"].click()
+        execute.assert_not_called()
+        self.assertIn("Defekte Belegung", message.call_args.args[2])
+
+    def test_overview_key_shortcut_opens_integrated_screen_page(self):
+        window = self.window()
+        button = next(button for button in window.overview_tab.findChildren(gui.QPushButton)
+                      if button.text() == "LCD-Tasten belegen")
+        button.click()
+        self.assertEqual(window.navigation.currentRow(), 1)
+        self.assertTrue(all(button.isVisible()
+                            for button in window.custom_tab.function_buttons.values()))
 
     def test_bars_and_image_handles_use_scaled_input(self):
         canvas = gui.ScreenPreviewCanvas()

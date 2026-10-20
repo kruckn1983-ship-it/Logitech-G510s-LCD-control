@@ -96,7 +96,6 @@ class ScreenCatalogTests(unittest.TestCase):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PyQt5.QtWidgets import QApplication, QMessageBox
         import g510_app as gui
-        import g510_key_settings as settings
         app = QApplication.instance() or QApplication([])
         self.catalog.parent.mkdir(parents=True)
         layout = self.catalog.with_name("custom_screens.txt")
@@ -107,8 +106,6 @@ class ScreenCatalogTests(unittest.TestCase):
             patch.object(gui.CustomScreensTab, "refresh_preview"),
             patch.object(gui, "load_bindings",
                          side_effect=lambda: keys.load_bindings(self.bindings_file)),
-            patch.object(settings, "load_bindings",
-                         side_effect=lambda: keys.load_bindings(self.bindings_file)),
             patch.object(gui.QMessageBox, "critical",
                          side_effect=AssertionError("Unexpected GUI error")),
         )
@@ -116,8 +113,6 @@ class ScreenCatalogTests(unittest.TestCase):
             context.start()
             self.addCleanup(context.stop)
         tab = gui.CustomScreensTab()
-        key_tab = settings.ScreenKeysTab()
-        tab.screens_changed.connect(key_tab.reload)
         before = tab.config["L2"]
         self.assertFalse(hasattr(tab, "screen_buttons"))
         for number in range(6, 36):
@@ -127,7 +122,9 @@ class ScreenCatalogTests(unittest.TestCase):
             self.assertEqual(tab.screen_number(), number)
             self.assertEqual(keys.read_screen(), number)
         self.assertEqual(tab.screen_combo.count(), 35)
-        self.assertEqual(key_tab.screen.count(), 35)
+        tab.populate_function_menu("L2")
+        self.assertIn("screen_35", [
+            item.data() for item in tab.function_menu_buttons["L2"].menu().actions()])
         self.assertEqual(tab.config["L2"], before)
         catalog_before = self.catalog.read_text()
         layout_before = layout.read_text()
@@ -147,12 +144,12 @@ class ScreenCatalogTests(unittest.TestCase):
         self.assertEqual(self.catalog.read_text(), catalog_before)
         self.assertEqual(layout.read_text(), layout_before)
         self.assertEqual(tab.screen_combo.count(), 35)
-        self.assertIn("screen_35", [
-            key_tab.combos["L2"].itemData(n) for n in range(key_tab.combos["L2"].count())])
         with patch.object(gui.QInputDialog, "getText", return_value=("Renamed", True)):
             tab.rename_screen()
         self.assertEqual(tab.screen_combo.currentText(), "Renamed")
-        self.assertEqual(key_tab.screen.itemText(key_tab.screen.findData(35)), "Renamed")
+        tab.populate_function_menu("L2")
+        self.assertEqual(next(item.text() for item in tab.function_menu_buttons["L2"].menu().actions()
+                              if item.data() == "screen_35"), "Bildschirm: Renamed")
         self.assertEqual(keys.action_labels()["screen_35"], "Bildschirm: Renamed")
         tab.config["L35"] = [{"kind": "text", "content": "High ID",
                               "x": 2, "y": 3, "font_size": 0}]
@@ -192,7 +189,6 @@ class ScreenCatalogTests(unittest.TestCase):
             tab.on_apply_default_layout()
         self.assertIn("L36", gui.load_custom_screens())
         tab.close()
-        key_tab.close()
         self.assertIsNotNone(app)
 
 

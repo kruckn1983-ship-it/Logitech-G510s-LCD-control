@@ -26,6 +26,9 @@ class ScreenKeyTests(unittest.TestCase):
         clock = patch.object(keys, "CLOCK_LAYOUT_PATH", self.root / "clock_layout")
         clock.start()
         self.addCleanup(clock.stop)
+        designs = patch.object(keys, "DESIGN_DATA_DIR", self.root)
+        designs.start()
+        self.addCleanup(designs.stop)
         self.env = patch.dict(os.environ, XDG_RUNTIME_DIR=str(self.root))
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -36,9 +39,10 @@ class ScreenKeyTests(unittest.TestCase):
 
     def test_defaults_and_persistence(self):
         data = keys.load_bindings(self.config)
-        self.assertEqual(list(data["3"].values()), ["previous", "next", "play", "pause"])
-        self.assertTrue(all(action == "none" for screen, mapping in data.items()
-                            if screen not in ("1", "3") for action in mapping.values()))
+        self.assertEqual(list(data["3"].values()), ["design_previous", "design_next", "play", "pause"])
+        self.assertTrue(all(list(data[str(screen)].values()) ==
+                            ["design_previous", "design_next", "none", "none"]
+                            for screen in (2, 4, 5)))
         self.assertEqual(list(data["1"].values()), ["clock_previous", "clock_next", "none", "none"])
         data["2"]["L2"] = "mute"
         keys.save_bindings(data, self.config)
@@ -114,13 +118,13 @@ class ScreenKeyTests(unittest.TestCase):
         with patch.object(keys, "load_bindings", return_value=data), \
                 patch.object(keys, "perform_action") as action:
             keys.handle_key("L2")
-            action.assert_called_with("previous")
+            action.assert_called_with("design_previous")
             data["3"]["L2"] = "play_pause"
             keys.handle_key("L2")
             action.assert_called_with("play_pause")
             keys.show_screen(2)
             keys.handle_key("L2")
-            action.assert_called_with("none")
+            action.assert_called_with("design_previous")
 
     def test_player_selection_prefers_active_and_uses_single_instance(self):
         output = ("vlc\x1fPaused\nbrave.instance10\x1fPlaying\n"
@@ -173,7 +177,7 @@ class ScreenKeyTests(unittest.TestCase):
             tab.combos["L2"].setCurrentIndex(tab.combos["L2"].findData("mute"))
             tab.save()
             self.assertEqual(save.call_args.args[0]["3"]["L2"], "mute")
-            self.assertEqual(save.call_args.args[0]["2"]["L2"], "none")
+            self.assertEqual(save.call_args.args[0]["2"]["L2"], "design_previous")
             show.assert_not_called()
             tab.show_selected()
             show.assert_called_once_with(3)
@@ -246,6 +250,20 @@ class ButtonListenerTests(unittest.TestCase):
                 self.assertEqual(layout.read_text(), expected)
                 self.assertEqual((runtime / "g510lcd_screen").read_text(), "1")
 
+    def test_physical_design_keys_wrap_each_screen_and_persist_after_helper_restart(self):
+        with tempfile.TemporaryDirectory() as home:
+            runtime = Path(home)
+            events = runtime / "events"
+            env = dict(os.environ, HOME=home, XDG_RUNTIME_DIR=home, EVENTS=str(events))
+            for screen in (2, 3, 4, 5):
+                (runtime / "g510lcd_screen").write_text(str(screen))
+                layout = runtime / f".local/share/g510-lcd/screen_design_{screen}"
+                for code, expected in ((697, "19\n"), (698, "0\n"), (698, "1\n")):
+                    events.write_bytes(struct.pack("@llHHi", 0, 0, 1, code, 1))
+                    subprocess.run([str(self.directory / "listener")], env=env, check=True)
+                    self.assertEqual(layout.read_text(), expected)
+                    self.assertEqual((runtime / "g510lcd_screen").read_text(), str(screen))
+
     def test_single_live_key_press_is_processed_before_stream_closes(self):
         with tempfile.TemporaryDirectory() as home:
             runtime = Path(home)
@@ -280,7 +298,7 @@ class ScreenSelectionGuiTests(unittest.TestCase):
         from types import SimpleNamespace
         config = {key: [] for key in gui.CUSTOM_SCREEN_KEYS}
         custom = SimpleNamespace(
-            config=config, current_screen="L3",
+            config=config, current_screen="L3", key_bindings=keys.default_bindings(),
             apply_selected_screen=lambda: gui.CustomScreensTab.apply_selected_screen(custom),
             screen_number=lambda: 3)
         with patch.object(gui, "show_screen") as show, \
@@ -297,7 +315,6 @@ class ScreenSelectionGuiTests(unittest.TestCase):
             window = SimpleNamespace(
                 custom_tab=custom,
                 keyboard_tab=SimpleNamespace(_pending_rgb=(1, 2, 3)),
-                keys_tab=SimpleNamespace(bindings=keys.default_bindings()),
                 page_widgets=[custom],
                 pages=SimpleNamespace(currentIndex=lambda: 0),
                 status=SimpleNamespace(showMessage=Mock()))
@@ -321,9 +338,8 @@ class ScreenSelectionGuiTests(unittest.TestCase):
                     gui.MainWindow.on_save_all(window)
                 critical.assert_called_once()
                 information.assert_not_called()
-                window.keys_tab.screen = SimpleNamespace(
-                    currentData=lambda: 4, currentText=lambda: "Spiele")
-                window.page_widgets = [window.keys_tab]
+                custom.current_screen = "L4"
+                custom.screen_number = lambda: 4
                 show.reset_mock()
                 critical.reset_mock()
                 with patch.object(gui, "read_screen", return_value=4):

@@ -22,7 +22,18 @@ Das PKGBUILD von `packaging/g910-control` installiert seine `.py`-Dateien direkt
 
 - `/usr/bin/g510-lcd` – schlanker Starter, der das eigentliche Skript mit `exec` ausführt
 - `/usr/lib/g510-lcd/src/*.py` und kompilierte `*.c`-Programme – gleiche Struktur wie ein geklontes Repository, nicht abgeflacht
-- `/usr/lib/systemd/user/g510-lcd-stats.service`, `g510-lcd-buttons.service` und `g510-macro-daemon.service`
+- `/usr/lib/systemd/user/g510-lcd-stats.service`, `g510-lcd-buttons.service`, `g510-macro-daemon.service`, `g510-backlight.service` und `g510-game-colors.service`
+
+Der zusätzliche Backlight-Dienst stellt die zuletzt gespeicherte Farbe bei der
+Anmeldung wieder her. Bei einer Paketinstallation einmal als Benutzer aktivieren:
+`systemctl --user enable --now g510-backlight.service`.
+Erfolgreicher Status: `active (exited)`. Die GUI muss dafür nicht geöffnet werden.
+
+Optionale Spielfarben verwaltet `g510-game-colors.service`:
+`systemctl --user enable --now g510-game-colors.service`.
+Er verwendet das Modul `src/g510_game_colors.py`, PyQt5/QtDBus und unter
+X11 `xprop` (`xorg-xprop`). KDE/KWin wird auch unter Wayland unterstützt.
+Die pro Spiel gespeicherten Farben verändern die Standardfarbe nicht.
 - `/usr/lib/udev/rules.d/99-g510-lcd.rules` – bytegenau wie die eingecheckte Quelldatei installiert (siehe die inzwischen behobene Lücke weiter unten)
 - `/usr/lib/g510-lcd/restore-backlight.sh` – von udev aufgerufener Starter zum Wiederherstellen der Beleuchtung (siehe unten)
 - `/usr/share/applications/g510-lcd.desktop`

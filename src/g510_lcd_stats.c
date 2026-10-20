@@ -3463,11 +3463,18 @@ static void draw_media_icon(g15canvas *c, int x, int y, int playing) {
     }
 }
 
-static void draw_idle_animation_frame(g15canvas *c, int gaming, double seconds) {
-    const char *heading = gaming ? "GAMING" : "MEDIA CENTER";
-    int width = measure_builtin_text_width(heading, G15_TEXT_MED);
-    g15r_renderString(c, (unsigned char *)heading, 0, G15_TEXT_MED,
-                      (G15_LCD_WIDTH - width) / 2, 1);
+static void draw_fullscreen_animation(g15canvas *output, g15canvas *scene,
+                                      int source_y, int source_height) {
+    for (int y = 0; y < G15_LCD_HEIGHT; y++)
+        for (int x = 0; x < G15_LCD_WIDTH; x++)
+            if (g15r_getPixel(scene, x, source_y + y * source_height / G15_LCD_HEIGHT))
+                g15r_setPixel(output, x, y, G15_COLOR_BLACK);
+}
+
+static void draw_idle_animation_frame(g15canvas *output, int gaming, double seconds) {
+    g15canvas scene G15_CANVAS_AUTO = {0};
+    g15r_initCanvas(&scene);
+    g15canvas *c = &scene;
     if (gaming) {
         /* A looping pixel spacecraft patrol, not a simulated running game. */
         int ship_x = 18 + (int)(seconds * 18) % 124;
@@ -3502,10 +3509,7 @@ static void draw_idle_animation_frame(g15canvas *c, int gaming, double seconds) 
         g15r_pixelBox(c, 72, 27 + bob, 76, 29 + bob, G15_COLOR_BLACK, 1, 1);
         g15r_pixelBox(c, 80, 25 + bob, 84, 27 + bob, G15_COLOR_BLACK, 1, 1);
     }
-    const char *caption = gaming ? "Ready to rumble" : "BEREIT FUER MUSIK & FILM";
-    width = measure_builtin_text_width(caption, G15_TEXT_SMALL);
-    g15r_renderString(c, (unsigned char *)caption, 0, G15_TEXT_SMALL,
-                      (G15_LCD_WIDTH - width) / 2, 36);
+    draw_fullscreen_animation(output, &scene, 12, 24);
 }
 
 static void draw_idle_animation(g15canvas *c, int gaming) {
@@ -3555,8 +3559,22 @@ static void draw_media_dashboard(g15canvas *c) {
     draw_visualizer_element(c, &vz);
 }
 
+#include "screen_designs.h"
+
 static void draw_custom_screen(g15canvas *c, int screen_num) {
     g_element_bounds_count = 0;
+    g_game_element_bounds_count = 0;
+    int design = read_screen_design(screen_num);
+    if (design != 0) memset(&current_custom_screen, 0, sizeof(current_custom_screen));
+    if (design < 0) {
+        design_text(c, "DESIGN-FEHLER", G15_TEXT_MED, 2, 16, 156, 10, 1);
+        return;
+    }
+    if (design > 0) {
+        draw_screen_design(c, screen_num, design);
+        g_element_bounds_count = 0;
+        return;
+    }
     load_custom_screen(screen_num);
     if (screen_num == GAME_SCREEN && g_media_is_game) {
         draw_game_dashboard(c);
@@ -3656,27 +3674,23 @@ int main(int argc, char **argv) {
         update_media_info();
         update_game_title();
         viz_set_preview_placeholder();
-        if (screen >= 2) {
-            load_custom_screen(screen);
-            for (int i = 0; i < current_custom_screen.count; i++) {
-                if (strncmp(current_custom_screen.elements[i].sensor, "CPU_CORE_", 9) == 0) {
-                    usleep(100000);
-                    update_cpu_core_percent();
-                    break;
-                }
-            }
-        }
-        if (screen >= 2 && !have_network_snapshot) {
+        int design = read_screen_design(screen);
+        int sample_threads = screen == 2 && design > 0;
+        int sample_network = design > 0 &&
+            (screen == 5 || (screen == 2 && design == 14) ||
+             (screen == GAME_SCREEN && design == 15 && g_media_is_game));
+        if (screen >= 2 && design == 0) {
             load_custom_screen(screen);
             for (int i = 0; i < current_custom_screen.count; i++) {
                 const char *sensor = current_custom_screen.elements[i].sensor;
-                if (strcmp(sensor, "NET_DOWN") == 0 || strcmp(sensor, "NET_UP") == 0) {
-                    usleep(100000);
-                    update_net_speed();
-                    break;
-                }
+                if (strncmp(sensor, "CPU_CORE_", 9) == 0) sample_threads = 1;
+                if (strcmp(sensor, "NET_DOWN") == 0 || strcmp(sensor, "NET_UP") == 0)
+                    sample_network = 1;
             }
         }
+        if (sample_threads || (sample_network && !have_network_snapshot)) usleep(100000);
+        if (sample_threads) update_cpu_core_percent();
+        if (sample_network && !have_network_snapshot) update_net_speed();
         if (screen == 1) draw_clock_screen(&canvas);
         else if (screen >= 2) {
             draw_custom_screen(&canvas, screen);
